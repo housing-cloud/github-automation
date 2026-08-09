@@ -1,0 +1,15 @@
+[install]
+
+# Whether to install peer dependencies
+peer = true
+
+# whether to save text vs binary lock file
+saveTextLockfile = true
+
+# Use isolated installs to avoid phantom dependencies across workspaces
+linker = "isolated"
+
+[install.lockfile]
+
+# whether to save the lockfile to disk
+save = true

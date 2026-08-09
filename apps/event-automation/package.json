@@ -1,0 +1,31 @@
+{
+  "name": "@hou/event-automation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "clean": "git clean -xdf .next .turbo node_modules out dist coverage",
+    "dev": "ENVIRONMENT=local LOG_LEVEL=${LOG_LEVEL:-debug} bun --watch src/index.ts",
+    "start": "bun run src/index.ts",
+    "typecheck": "tsgo --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "biome check .",
+    "check:error": "biome check . --diagnostic-level=error",
+    "check:fix": "biome check --write .",
+    "check:unsafe": "biome check --write --unsafe ."
+  },
+  "dependencies": {
+    "@samyx/gha-plugin-dokploy": "0.0.0-pre.22-rx",
+    "@samyx/gha-ui": "0.0.0-pre.22-rx",
+    "@samyx/github-automation-suite": "0.0.0-pre.22-rx",
+    "hono": "^4.12.26",
+    "octokit": "^4.1.4",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@hou/typescript": "workspace:*",
+    "@types/node": "^22.13.14",
+    "vitest": "catalog:"
+  }
+}

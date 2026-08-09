@@ -1,0 +1,14 @@
+{
+  "name": "@hou/typescript",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "tsgo": "./bin/tsgo.js"
+  },
+  "dependencies": {
+    "@typescript/native-preview": "catalog:"
+  },
+  "exports": {
+    ".": "./tsconfig.json"
+  }
+}

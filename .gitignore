@@ -1,0 +1,27 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# build output
+dist/
+out/
+.next/
+coverage/
+
+# caches
+.turbo/
+*.tsbuildinfo
+
+# local tooling state
+.lefthook-local/
+
+# env / secrets
+.env
+.env.*
+!.env.example
+
+# editor / os
+.DS_Store
+*.log
+out/

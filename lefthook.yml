@@ -1,0 +1,121 @@
+pre-commit:
+  commands:
+    # Snapshot staged changes to a patch BEFORE the checks run. lefthook can
+    # fail to roll back its internal stash when a later step errors, losing
+    # staged work. Recover the most recent snapshot with:
+    #   git apply --index .lefthook-local/staged-<timestamp>.patch
+    backup-staged:
+      priority: 1
+      run: |
+        if [ -n "$CI" ]; then
+          exit 0
+        fi
+        if ! git diff --cached --quiet; then
+          mkdir -p .lefthook-local
+          # Append the PID so two runs in the same second don't overwrite.
+          snapshot=".lefthook-local/staged-$(date +%Y%m%d-%H%M%S)-$$.patch"
+          git diff --cached --binary > "$snapshot" || true
+          # Prune snapshots older than 7 days to bound the directory size.
+          find .lefthook-local -name 'staged-*.patch' -mtime +7 -delete 2>/dev/null || true
+        fi
+        exit 0
+    check:
+      priority: 2
+      run: bun run biome check --diagnostic-level=error --write --no-errors-on-unmatched --files-ignore-unknown=true {staged_files}
+      stage_fixed: true
+    sgr:
+      priority: 3
+      run: bun run sgr
+      files: git diff --name-only --staged
+    readmes:
+      priority: 4
+      run: bun run check:readmes -- {staged_files}
+    # Secret scan of the staged diff (config: .gitleaks.toml + .gitleaksignore).
+    # Best-effort: if gitleaks isn't installed locally it prints an install hint
+    # and passes — the CI gate (.github/workflows/gitleaks.yml) is the hard
+    # enforcement point, so a missing local binary never blocks a commit.
+    gitleaks:
+      priority: 5
+      run: |
+        if ! command -v gitleaks >/dev/null 2>&1; then
+          echo "gitleaks not installed — skipping local secret scan (CI enforces it)."
+          echo "  Install it for pre-commit protection: brew install gitleaks"
+          exit 0
+        fi
+        gitleaks git --staged --redact --no-banner
+
+pre-push:
+  commands:
+    validate:
+      run: bun validate:pre-push
+
+post-checkout:
+  commands:
+    rulesync-post-checkout:
+      run: |
+        if [ -n "$CI" ]; then
+          exit 0
+        fi
+        git_dir=$(git rev-parse --git-dir)
+        if [ -d "$git_dir/rebase-merge" ] || [ -d "$git_dir/rebase-apply" ]; then
+          exit 0
+        fi
+        old_ref="${1:-}"
+        new_ref="${2:-}"
+        is_branch_checkout="${3:-}"
+        if [ "$is_branch_checkout" != "1" ]; then
+          exit 0
+        fi
+        if [ -n "$old_ref" ] && [ -n "$new_ref" ] && git rev-parse -q --verify "$old_ref" >/dev/null && git rev-parse -q --verify "$new_ref" >/dev/null; then
+          changed=$(git diff --name-only "$old_ref" "$new_ref" -- .rulesync rulesync.jsonc)
+        elif git rev-parse -q --verify HEAD@{1} >/dev/null; then
+          changed=$(git diff --name-only HEAD@{1} HEAD -- .rulesync rulesync.jsonc)
+        else
+          changed=
+        fi
+        if [ -n "$changed" ]; then
+          bun run rulesync:generate
+        fi
+
+post-merge:
+  commands:
+    rulesync-post-merge:
+      run: |
+        if [ -n "$CI" ]; then
+          exit 0
+        fi
+        if git rev-parse -q --verify ORIG_HEAD >/dev/null; then
+          changed=$(git diff --name-only ORIG_HEAD HEAD -- .rulesync rulesync.jsonc)
+        elif git rev-parse -q --verify HEAD@{1} >/dev/null; then
+          changed=$(git diff --name-only HEAD@{1} HEAD -- .rulesync rulesync.jsonc)
+        else
+          changed=
+        fi
+        if [ -n "$changed" ]; then
+          bun run rulesync:generate
+        fi
+
+post-rewrite:
+  commands:
+    rulesync-post-rewrite:
+      run: |
+        if [ -n "$CI" ]; then
+          exit 0
+        fi
+        rewrite_type="${1:-}"
+        if [ "$rewrite_type" = "amend" ]; then
+          if git rev-parse -q --verify HEAD@{1} >/dev/null; then
+            changed=$(git diff --name-only HEAD@{1} HEAD -- .rulesync rulesync.jsonc)
+          else
+            changed=
+          fi
+        elif git rev-parse -q --verify ORIG_HEAD >/dev/null; then
+          changed=$(git diff --name-only ORIG_HEAD HEAD -- .rulesync rulesync.jsonc)
+        elif git rev-parse -q --verify HEAD@{1} >/dev/null; then
+          changed=$(git diff --name-only HEAD@{1} HEAD -- .rulesync rulesync.jsonc)
+        else
+          changed=
+        fi
+        if [ -n "$changed" ]; then
+          bun run rulesync:generate
+        fi

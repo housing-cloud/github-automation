@@ -6,14 +6,11 @@ import { toHono } from '@samyx/github-automation-suite/hono';
 import { githubPlugin } from '@samyx/github-automation-suite/plugins/github';
 import { eventLogPlugin } from '@samyx/github-automation-suite/plugins/event-log';
 import { eventLogRoutes } from '@samyx/github-automation-suite/plugins/event-log/hono';
-import { dokployPlugin } from '@samyx/gha-plugin-dokploy';
 import { previewStacksPlugin } from '@samyx/gha-plugin-preview-stacks';
 import { Hono, type MiddlewareHandler } from 'hono';
-import { DokployClient } from './dokploy/client';
 import type { AppEnv } from './env';
-import type { TrackerOctokit } from './github/checks';
+import type { AppOctokit } from './github/checks';
 import { createOctokit } from './github/octokit';
-import { PreviewTracker } from './preview/tracker';
 import { PstackReporter } from './pstack/reporter';
 import { createRules } from './rules';
 
@@ -23,27 +20,25 @@ export interface CreateEventAutomationAppOptions {
   /**
    * Inject an Octokit client (used by tests). When omitted, the GitHub plugin
    * builds an installation client from the GitHub App credentials in `env`.
-   * Widened past the suite's `OctokitLike` because the preview tracker also
-   * updates check runs and PR comments (see `github/checks.ts`).
+   * Widened past the suite's `OctokitLike` because the reporter also updates
+   * check runs and PR comments (see `github/checks.ts`).
    */
-  octokit?: TrackerOctokit;
+  octokit?: AppOctokit;
   fetch?: typeof fetch;
-  /** Override the tracker (tests inject a fake clock / fake sleep). */
-  tracker?: PreviewTracker;
   /** Override the pstack reporter (tests inject a recording Octokit). */
   pstack?: PstackReporter;
 }
 
 export interface EventAutomationApp {
   app: Hono;
-  tracker: PreviewTracker;
   pstack: PstackReporter;
 }
 
 /**
  * Build the event-automation Hono app on top of
- * `@samyx/github-automation-suite`: the GitHub + Dokploy source plugins plus
- * the HOU rules, exposed as `POST /webhooks/{github,dokploy}` and `GET /health`.
+ * `@samyx/github-automation-suite`: the GitHub + preview-stacks source plugins
+ * plus the HOU rules, exposed as `POST /webhooks/{github,preview-stacks}` and
+ * `GET /health`.
  */
 export async function createEventAutomationApp(
   options: CreateEventAutomationAppOptions,
@@ -51,7 +46,7 @@ export async function createEventAutomationApp(
   return (await createEventAutomation(options)).app;
 }
 
-/** Same as {@link createEventAutomationApp}, also returning the tracker. */
+/** Same as {@link createEventAutomationApp}, also returning the reporter. */
 export async function createEventAutomation(
   options: CreateEventAutomationAppOptions,
 ): Promise<EventAutomationApp> {
@@ -59,7 +54,7 @@ export async function createEventAutomation(
   const logger = options.logger ?? noopLogger;
 
   // One installation client, shared by the GitHub plugin's handlers and the
-  // tracker's check-run / comment upserts.
+  // reporter's check-run / comment upserts.
   const octokit =
     options.octokit ??
     (await createOctokit({
@@ -70,23 +65,6 @@ export async function createEventAutomation(
 
   // Records every received webhook into an in-memory LRU, served at `/events`.
   const eventLog = eventLogPlugin({ limit: env.eventLogLimit });
-
-  const tracker =
-    options.tracker ??
-    new PreviewTracker({
-      dokploy: new DokployClient({
-        baseUrl: env.dokployBaseUrl,
-        apiKey: env.dokployApiKey,
-        fetch: options.fetch,
-      }),
-      // The tracker needs check-run *updates*, which the suite's plugin does
-      // not expose, so it holds the client directly.
-      octokit,
-      dokployBaseUrl: env.dokployBaseUrl,
-      logger,
-      pollIntervalMs: env.previewPollIntervalMs,
-      timeoutMs: env.previewTimeoutMs,
-    });
 
   // pstack reports on one repo's preview stacks: its payloads name a stack
   // (`pr-16828`) and never a repository, so the repo comes from config.
@@ -112,38 +90,22 @@ export async function createEventAutomation(
         allowedRepos: env.githubAllowedRepos,
         octokit,
       }),
-      // Dokploy webhooks are unsigned; the shared token goes in a custom
-      // `x-webhook-token` header configured on the Dokploy notification.
-      dokployPlugin({
-        token: env.dokployWebhookToken,
-        baseUrl: env.dokployBaseUrl,
-        apiKey: env.dokployApiKey,
-        org: env.githubOrg,
-        allowedRepos: env.githubAllowedRepos,
-        applicationRepoMap: env.dokployApplicationRepoMap,
-        fetch: options.fetch,
-      }),
       // pstack signs its envelope (HMAC over `timestamp + "." + rawBody`), so
-      // unlike Dokploy this ingress is genuinely authenticated.
+      // this ingress is genuinely authenticated rather than token-gated.
       previewStacksPlugin({
         secret: env.pstackWebhookSecret,
         toleranceMs: env.pstackToleranceMs,
       }),
     ],
-    rules: createRules({ env, tracker, pstack }),
+    rules: createRules({ env, pstack }),
   });
 
   const app = toHono(engine);
   app.get('/health', (c) => c.json({ status: 'ok' }));
 
-  // Live preview trackers — the poll loops currently watching a PR, and the
-  // pstack stacks currently mirrored onto checks.
+  // The preview stacks currently mirrored onto GitHub checks.
   app.get('/previews', (c) =>
-    c.json({
-      count: tracker.active.length,
-      tracking: tracker.active,
-      pstackStacks: pstack.active,
-    }),
+    c.json({ count: pstack.active.length, stacks: pstack.active }),
   );
 
   // `/events` — HTML table of received webhooks; `/events/json` — the same as
@@ -173,11 +135,10 @@ export async function createEventAutomation(
       config: {
         org: env.githubOrg,
         allowedRepos: [...env.githubAllowedRepos],
-        dokployBaseUrl: env.dokployBaseUrl,
-        trackedRepos: [...env.repoApplications.keys()],
         pstackRepo: env.pstackRepo,
         pstackServices: [...env.pstackServices],
-        previewPollIntervalMs: env.previewPollIntervalMs,
+        pstackBaseUrl: env.pstackBaseUrl,
+        previewDomain: env.pstackPreviewDomain,
         eventLogLimit: env.eventLogLimit,
       },
     }),
@@ -191,9 +152,8 @@ export async function createEventAutomation(
     title: 'HOU event automation',
     descriptions: {
       'GET /health': 'Liveness / readiness probe',
-      'GET /previews': 'Preview deployments currently being polled',
+      'GET /previews': 'Preview stacks currently mirrored onto GitHub checks',
       'POST /webhooks/github': 'GitHub App webhook ingress',
-      'POST /webhooks/dokploy': 'Dokploy notification webhook ingress',
       'POST /webhooks/preview-stacks':
         'pstack (preview-stacks) signed webhook ingress',
       'GET /events': 'Received-webhooks log (HTML table)',
@@ -203,7 +163,7 @@ export async function createEventAutomation(
     },
   });
 
-  return { app, tracker, pstack };
+  return { app, pstack };
 }
 
 /**

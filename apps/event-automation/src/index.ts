@@ -8,11 +8,9 @@ const app = await createEventAutomationApp({ env, logger: consoleLogger });
 consoleLogger.info(
   {
     port: env.port,
-    dokploy: env.dokployBaseUrl,
-    repos: [...env.repoApplications.keys()],
-    pollIntervalMs: env.previewPollIntervalMs,
-    pstackRepo: env.pstackRepo,
-    pstackServices: [...env.pstackServices],
+    repo: env.pstackRepo,
+    services: [...env.pstackServices],
+    pstack: env.pstackBaseUrl,
   },
   'event automation service listening',
 );

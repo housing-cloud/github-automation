@@ -2,11 +2,11 @@
  * The GitHub REST calls this service needs beyond the suite's `OctokitLike`.
  *
  * The suite's GitHub plugin only *creates completed* check runs, which is
- * enough to mirror a finished deploy but not to track one: a queued preview has
- * to show up immediately as `in_progress` and then be *updated* in place, and
- * the PR comment has to be edited rather than re-posted every 30s. Both need
- * endpoints outside `OctokitLike`, so this widened interface is what the
- * tracker asks the service registry for.
+ * enough to mirror a finished deploy but not to track one: a preview stack has
+ * to show up immediately as `in_progress` and then be *updated* in place as its
+ * containers report, and the PR comment has to be edited rather than re-posted.
+ * Both need endpoints outside `OctokitLike`, so this widened interface is what
+ * the pstack reporter uses.
  */
 
 export type CheckStatus = 'queued' | 'in_progress' | 'completed';
@@ -32,9 +32,9 @@ export interface IssueComment {
  * The slice of Octokit this service depends on.
  *
  * A strict superset of the suite's `OctokitLike`, so one client satisfies both
- * the GitHub plugin's handlers and the tracker's upserts.
+ * the GitHub plugin's handlers and the reporter's upserts.
  */
-export interface TrackerOctokit {
+export interface AppOctokit {
   rest: {
     checks: {
       create: (params: {
@@ -136,7 +136,7 @@ export interface RepoRef {
  * Returns the check run id so a caller can keep updating without re-listing.
  */
 export async function upsertCheckRun(
-  octokit: TrackerOctokit,
+  octokit: AppOctokit,
   repo: RepoRef,
   params: {
     name: string;
@@ -188,7 +188,7 @@ export async function upsertCheckRun(
 }
 
 async function findCheckRun(
-  octokit: TrackerOctokit,
+  octokit: AppOctokit,
   repo: RepoRef,
   ref: string,
   name: string,
@@ -213,7 +213,7 @@ async function findCheckRun(
  * would append a new comment; with it the same comment is edited in place.
  */
 export async function upsertComment(
-  octokit: TrackerOctokit,
+  octokit: AppOctokit,
   repo: RepoRef,
   issueNumber: number,
   marker: string,
@@ -244,7 +244,7 @@ export async function upsertComment(
 }
 
 async function findComment(
-  octokit: TrackerOctokit,
+  octokit: AppOctokit,
   repo: RepoRef,
   issueNumber: number,
   marker: string,

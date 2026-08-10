@@ -52,17 +52,14 @@ describe('.env.example', () => {
     const env = loadEnv(parseDotenv(text));
 
     expect(env.githubOrg).toBe('housing-cloud');
-    expect(env.dokployBaseUrl).toBe('https://dokploy.housing.cloud');
-    // Every repo in the application map must be an allowed repo — loadEnv
-    // enforces this, so reaching here proves the example is self-consistent.
-    expect([...env.repoApplications.keys()]).toEqual(['web', 'api']);
-    expect(env.repoApplications.get('web')).toEqual({
-      applicationId: 'kZ8sq2Lm-abc',
-      name: 'web-app',
-    });
+    // PSTACK_REPO must be an allowed repo — loadEnv enforces this, so reaching
+    // here proves the example is self-consistent.
+    expect(env.pstackRepo).toBe('web');
+    expect([...env.githubAllowedRepos]).toEqual(['web', 'api']);
     // Commented-out optionals fall back to their documented defaults.
-    expect(env.previewPollIntervalMs).toBe(30_000);
-    expect(env.previewTimeoutMs).toBe(30 * 60_000);
+    expect([...env.pstackServices]).toEqual(['db-seed', 'web']);
+    expect(env.pstackToleranceMs).toBeUndefined();
+    expect(env.eventLogLimit).toBe(500);
     expect(env.port).toBe(8080);
   });
 
@@ -87,8 +84,11 @@ describe('.env.example', () => {
     }
   });
 
-  it('carries no leftover Vercel configuration', () => {
-    const text = readExample();
+  it('carries no configuration for a removed provider', () => {
+    // Vercel then Dokploy were both ripped out; a stale block here is how an
+    // operator ends up setting a variable nothing reads.
+    const text = readExample().toUpperCase();
     expect(text).not.toContain('VERCEL');
+    expect(text).not.toContain('DOKPLOY');
   });
 });

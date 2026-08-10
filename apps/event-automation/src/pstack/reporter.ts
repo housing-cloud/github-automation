@@ -38,7 +38,7 @@ import {
   type CheckConclusion,
   type CheckStatus,
   type RepoRef,
-  type TrackerOctokit,
+  type AppOctokit,
   upsertCheckRun,
   upsertComment,
 } from '../github/checks';
@@ -51,7 +51,7 @@ import {
 } from './stack';
 
 /** Marker identifying the pstack comment, so it is edited rather than stacked. */
-export const PSTACK_COMMENT_MARKER = 'hou-event-automation:pstack-stack';
+const PSTACK_COMMENT_MARKER = 'hou-event-automation:pstack-stack';
 
 /** A pstack event, reduced to the fields the reporter reads. */
 export interface PstackSignal {
@@ -78,7 +78,7 @@ export interface PstackSignal {
 }
 
 export interface PstackReporterOptions {
-  octokit: TrackerOctokit;
+  octokit: AppOctokit;
   repo: RepoRef;
   logger: Logger;
   /** Services that get their own check run, e.g. `['db-seed', 'web']`. */
@@ -154,9 +154,20 @@ export class PstackReporter {
     await next;
   }
 
-  /** Drop a stack's state (its PR closed, or the deployment was deleted). */
-  forget(stack: string | undefined): void {
-    if (stack) this.stacks.delete(stack);
+  /**
+   * Drop every stack belonging to a pull request, returning the names dropped.
+   *
+   * One PR can own more than one stack when the deployments are prefixed
+   * (`web-pr-12`, `api-pr-12`), so this matches on the parsed PR number rather
+   * than guessing the stack name.
+   */
+  forgetPr(prNumber: number): string[] {
+    const dropped: string[] = [];
+    for (const [stack, state] of this.stacks) {
+      if (state.prNumber === prNumber) dropped.push(stack);
+    }
+    for (const stack of dropped) this.stacks.delete(stack);
+    return dropped;
   }
 
   private async stateFor(

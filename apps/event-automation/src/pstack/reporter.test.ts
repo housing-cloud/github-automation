@@ -8,7 +8,7 @@
 
 import { noopLogger } from '@samyx/github-automation-suite';
 import { describe, expect, it, vi } from 'vitest';
-import type { TrackerOctokit } from '../github/checks';
+import type { AppOctokit } from '../github/checks';
 import { PstackReporter, type PstackSignal } from './reporter';
 import {
   parseStackIdentity,
@@ -144,7 +144,7 @@ function mockOctokit(headSha = 'abc1234def') {
   const checks: Array<Record<string, unknown>> = [];
   const comments: Array<Record<string, unknown>> = [];
   let nextId = 500;
-  const octokit: TrackerOctokit = {
+  const octokit: AppOctokit = {
     rest: {
       checks: {
         create: vi.fn(async (params) => {

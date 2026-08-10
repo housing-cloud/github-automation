@@ -1,69 +1,41 @@
-import type {
-  AutomationContext,
-  HandlerSpec,
-  Rule,
-} from '@samyx/github-automation-suite';
+import type { HandlerSpec, Rule } from '@samyx/github-automation-suite';
 import { withHandlerDescription } from '@samyx/github-automation-suite';
-import { buildDokployRule, dokployFailed } from '@samyx/gha-plugin-dokploy';
 import {
   buildPreviewStacksRule,
   type PreviewStacksEventData,
 } from '@samyx/gha-plugin-preview-stacks';
 import { buildGithubRule } from '@samyx/github-automation-suite/plugins/github';
 import type { AppEnv } from './env';
-import type { PreviewTracker, TrackerTarget } from './preview/tracker';
 import type { PstackReporter, PstackSignal } from './pstack/reporter';
 
 export interface CreateRulesOptions {
   env: AppEnv;
-  tracker: PreviewTracker;
   pstack: PstackReporter;
 }
 
 /**
  * HOU automation rules.
  *
- * The contract is simple: **a pull request against a repo that has a Dokploy
- * application gets a check run tracking its preview deployment, plus one PR
- * comment carrying the preview URL and the deployment details.**
+ * The contract: **a preview stack named `pr-<number>` gets three GitHub check
+ * runs on that PR — the stack as a whole, plus one per watched compose service
+ * — and a single PR comment carrying the status and details.**
  *
- * Dokploy's own GitHub receiver creates and queues the preview; this service
- * never triggers the deploy, it only *reports* it. Because Dokploy's webhooks
- * carry no PR identity (see `preview/tracker.ts`), the reporting is done by a
- * poller the PR events start — a `pull_request` webhook is the trigger, the
- * Dokploy REST API is the source of truth.
+ * pstack owns the deploy; this service never triggers one, it only *reports*.
+ * The reporting is push-driven: pstack signs and delivers an event for every
+ * lifecycle transition, so there is nothing to poll.
  */
 export function createRules(options: CreateRulesOptions): Rule[] {
-  const { env } = options;
-
-  const rules: Rule[] = [
-    buildGithubRule({
-      name: 'dokploy-preview-track',
-      // The same actions Dokploy's own receiver acts on (`pages/api/deploy/
-      // github.ts`): each of these queues or re-queues a preview deployment.
-      events: [
-        'pull_request.opened',
-        'pull_request.reopened',
-        'pull_request.synchronize',
-      ],
-      handlers: [
-        withHandlerDescription(
-          trackPreviewHandler(options),
-          'track the PR’s Dokploy preview deployment on a GitHub check run + PR comment',
-        ),
-      ],
-    }),
-
+  return [
     /**
-     * Requirements 1–4, all served by one rule.
+     * The four reporting behaviours, all served by one rule.
      *
-     * The three checks (`pstack/stack`, `pstack/db-seed`, `pstack/web`) and the
-     * PR comment are different *views* of one per-stack state machine, and a
-     * single pstack event can move several of them at once — a `stack.timedout`
-     * both fails the stack check and, via `pendingContainers`, fails the `web`
-     * check. Splitting that across four rules would mean four rules racing to
-     * update the same check runs and the same comment, so the events are fed to
-     * one reporter that owns the state and serializes the GitHub writes.
+     * The three checks (`pstack/stack`, `pstack/<service>`) and the PR comment
+     * are different *views* of one per-stack state machine, and a single pstack
+     * event can move several of them at once — a `stack.timedout` both fails the
+     * stack check and, via `pendingContainers`, fails the `web` check. Splitting
+     * that across four rules would mean four rules racing to update the same
+     * check runs and the same comment, so the events are fed to one reporter
+     * that owns the state and serializes the GitHub writes.
      *
      * Test-button deliveries reuse the `job.succeeded` name;
      * `buildPreviewStacksRule` excludes them by default, which is kept.
@@ -80,7 +52,7 @@ export function createRules(options: CreateRulesOptions): Rule[] {
         'stack.ready',
         'stack.failed',
         'stack.timedout',
-        // Per-container verdicts -> the db-seed and web checks.
+        // Per-container verdicts -> the per-service checks.
         'container.ready',
         'container.start-failed',
         // Cancels the readiness watch, so no stack.* verdict will follow.
@@ -89,80 +61,37 @@ export function createRules(options: CreateRulesOptions): Rule[] {
       handlers: [
         withHandlerDescription(
           pstackHandler(options),
-          'mirror the preview stack + its db-seed/web containers onto GitHub check runs and a tracked PR comment',
+          'mirror the preview stack + its watched containers onto GitHub check runs and a tracked PR comment',
+        ),
+      ],
+    }),
+
+    /**
+     * Release a stack's in-memory state when its PR closes.
+     *
+     * The service is a long-running container, so without this the reporter
+     * would accumulate one entry per PR it ever saw. The checks and the comment
+     * already live on GitHub, so nothing is lost by forgetting.
+     */
+    buildGithubRule({
+      name: 'pstack-forget-closed-pr',
+      events: ['pull_request.closed'],
+      handlers: [
+        withHandlerDescription(
+          forgetClosedPrHandler(options),
+          'drop the closed PR’s preview-stack state from memory',
         ),
       ],
     }),
   ];
-
-  // A Dokploy build failure that maps to a repo is worth shouting about even
-  // though it carries no PR — the tracker already covers the per-PR path.
-  if (env.slackWebhookUrl) {
-    rules.push(
-      buildDokployRule({
-        name: 'dokploy-failure-slack',
-        when: dokployFailed(),
-        handlers: [
-          {
-            use: 'http.post',
-            critical: false,
-            with: {
-              url: env.slackWebhookUrl,
-              body: (ctx: AutomationContext) => ({
-                text: `Dokploy failure: ${
-                  ctx.event.data.dokployProject ?? 'unknown'
-                }/${ctx.event.data.dokployApplication ?? 'unknown'} — ${
-                  ctx.event.data.dokployErrorMessage ?? 'no message'
-                }`,
-              }),
-            },
-          } as HandlerSpec,
-        ],
-      }),
-    );
-  }
-
-  return rules;
-}
-
-/**
- * Start (or restart) the polling tracker for the PR this event concerns.
- *
- * Returns as soon as the loop is running: the loop lives for minutes, and the
- * webhook response must not wait for it. Its first action posts the queued
- * check + comment, so by the time GitHub retries anything the PR already shows
- * the deployment.
- */
-function trackPreviewHandler(options: CreateRulesOptions): HandlerSpec {
-  const { env, tracker } = options;
-  return {
-    critical: false,
-    run: async (ctx) => {
-      const target = trackerTargetFor(env, ctx.event.data);
-      if (!target) {
-        ctx.logger.debug(
-          { repo: ctx.event.data.repo?.name },
-          'no dokploy application mapped for this repo — skipping',
-        );
-        return;
-      }
-      ctx.logger.info(
-        { repo: target.repo.name, pr: target.prNumber, sha: target.headSha },
-        'tracking dokploy preview deployment',
-      );
-      // Fire-and-forget: the loop outlives the request by design.
-      void tracker.track(target);
-    },
-  };
 }
 
 /**
  * Feed one pstack event to the reporter.
  *
- * Awaited rather than fired-and-forgotten: unlike the Dokploy tracker (which
- * owns a minutes-long poll loop), this is a single bounded set of GitHub calls,
- * and awaiting keeps the deliveries for one stack ordered under the engine's
- * per-delivery handling.
+ * Awaited rather than fired-and-forgotten: this is a single bounded set of
+ * GitHub calls, and awaiting keeps the deliveries for one stack ordered under
+ * the engine's per-delivery handling.
  */
 function pstackHandler(options: CreateRulesOptions): HandlerSpec {
   const { pstack } = options;
@@ -174,8 +103,27 @@ function pstackHandler(options: CreateRulesOptions): HandlerSpec {
   };
 }
 
+/** Forget every stack this service tracked for the PR that just closed. */
+function forgetClosedPrHandler(options: CreateRulesOptions): HandlerSpec {
+  const { pstack } = options;
+  return {
+    critical: false,
+    run: async (ctx) => {
+      const prNumber = ctx.event.data.prNumber;
+      if (prNumber === undefined) return;
+      const dropped = pstack.forgetPr(prNumber);
+      if (dropped.length > 0) {
+        ctx.logger.debug(
+          { prNumber, stacks: dropped },
+          'pstack: released state for a closed PR',
+        );
+      }
+    },
+  };
+}
+
 /** Project the plugin's flattened pstack fields onto the reporter's input. */
-export function pstackSignalFrom(
+function pstackSignalFrom(
   data: PreviewStacksEventData,
   type: string,
 ): PstackSignal {
@@ -200,27 +148,5 @@ export function pstackSignalFrom(
     durationMs: data.pstackDurationMs,
     waitedMs: data.pstackWaitedMs,
     by: data.pstackBy,
-  };
-}
-
-/** Project a normalized PR event onto a tracker target, or `undefined`. */
-export function trackerTargetFor(
-  env: AppEnv,
-  data: {
-    repo?: { owner: string; name: string };
-    prNumber?: number;
-    sha?: string;
-  },
-): TrackerTarget | undefined {
-  const { repo, prNumber, sha } = data;
-  if (!repo || prNumber === undefined || !sha) return undefined;
-  const application = env.repoApplications.get(repo.name);
-  if (!application) return undefined;
-  return {
-    repo,
-    prNumber,
-    headSha: sha,
-    applicationId: application.applicationId,
-    applicationName: application.name,
   };
 }

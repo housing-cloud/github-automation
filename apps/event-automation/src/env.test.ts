@@ -9,10 +9,6 @@ function raw(overrides: Record<string, string | undefined> = {}) {
     GITHUB_ORG: 'housing-cloud',
     GITHUB_ALLOWED_REPOS: 'web, api',
     GITHUB_WEBHOOK_SECRET: 'gh-secret',
-    DOKPLOY_BASE_URL: 'https://dokploy.test/',
-    DOKPLOY_API_KEY: 'dokploy-key',
-    DOKPLOY_WEBHOOK_TOKEN: 'dokploy-token',
-    DOKPLOY_REPO_APPLICATION_MAP: 'web:app-1:web-app,api:app-2',
     PSTACK_WEBHOOK_SECRET: 'whsec_pstack',
     PSTACK_REPO: 'web',
     ...overrides,
@@ -25,10 +21,7 @@ describe('loadEnv', () => {
     expect(env.githubOrg).toBe('housing-cloud');
     expect([...env.githubAllowedRepos]).toEqual(['web', 'api']);
     expect(env.githubAppInstallationId).toBe(42);
-    // Trailing slash trimmed so URLs never double up.
-    expect(env.dokployBaseUrl).toBe('https://dokploy.test');
-    expect(env.previewPollIntervalMs).toBe(30_000);
-    expect(env.previewTimeoutMs).toBe(30 * 60_000);
+    expect(env.pstackRepo).toBe('web');
     expect(env.port).toBe(8080);
   });
 
@@ -36,36 +29,50 @@ describe('loadEnv', () => {
     expect(loadEnv(raw()).githubAppPrivateKey).toContain('\n');
   });
 
-  it('parses the repo → application map, defaulting the display name', () => {
-    const env = loadEnv(raw());
-    expect(env.repoApplications.get('web')).toEqual({
-      applicationId: 'app-1',
-      name: 'web-app',
-    });
-    expect(env.repoApplications.get('api')).toEqual({
-      applicationId: 'app-2',
-      name: 'api',
-    });
+  it('defaults the watched services to db-seed and web', () => {
+    expect([...loadEnv(raw()).pstackServices]).toEqual(['db-seed', 'web']);
   });
 
-  it('rejects a mapped repo that is not allowed', () => {
-    expect(() =>
-      loadEnv(raw({ DOKPLOY_REPO_APPLICATION_MAP: 'other:app-9' })),
-    ).toThrow(/not in GITHUB_ALLOWED_REPOS/);
+  it('parses an explicit service list', () => {
+    const env = loadEnv(raw({ PSTACK_SERVICES: 'web, worker ,db-seed' }));
+    expect([...env.pstackServices]).toEqual(['web', 'worker', 'db-seed']);
   });
 
-  it('rejects a malformed repo → application entry', () => {
-    expect(() => loadEnv(raw({ DOKPLOY_REPO_APPLICATION_MAP: 'web' }))).toThrow(
-      /repo:applicationId/,
+  it('rejects an empty service list', () => {
+    expect(() => loadEnv(raw({ PSTACK_SERVICES: ' , ' }))).toThrow(
+      /PSTACK_SERVICES/,
     );
   });
 
-  it('requires the Dokploy webhook token', () => {
-    expect(() => loadEnv(raw({ DOKPLOY_WEBHOOK_TOKEN: undefined }))).toThrow();
+  it('requires the pstack webhook secret', () => {
+    expect(() => loadEnv(raw({ PSTACK_WEBHOOK_SECRET: undefined }))).toThrow();
   });
 
-  it('requires a valid Dokploy base URL', () => {
-    expect(() => loadEnv(raw({ DOKPLOY_BASE_URL: 'not-a-url' }))).toThrow();
+  it('rejects a pstack repo that is not allowed', () => {
+    // The App would otherwise be asked to write checks to a repo the operator
+    // never listed.
+    expect(() => loadEnv(raw({ PSTACK_REPO: 'other' }))).toThrow(
+      /not in GITHUB_ALLOWED_REPOS/,
+    );
+  });
+
+  it('trims a trailing slash off the pstack base URL', () => {
+    const env = loadEnv(raw({ PSTACK_BASE_URL: 'https://pstack.test/' }));
+    expect(env.pstackBaseUrl).toBe('https://pstack.test');
+  });
+
+  it('rejects an invalid pstack base URL', () => {
+    expect(() => loadEnv(raw({ PSTACK_BASE_URL: 'not-a-url' }))).toThrow();
+  });
+
+  it('leaves the tolerance unset so the plugin default applies', () => {
+    expect(loadEnv(raw()).pstackToleranceMs).toBeUndefined();
+  });
+
+  it('rejects a sub-second replay tolerance', () => {
+    expect(() => loadEnv(raw({ PSTACK_TOLERANCE_MS: '500' }))).toThrow(
+      /PSTACK_TOLERANCE_MS/,
+    );
   });
 
   it('rejects a non-positive installation id', () => {
@@ -74,32 +81,30 @@ describe('loadEnv', () => {
     );
   });
 
-  it('rejects a sub-second poll interval', () => {
-    expect(() => loadEnv(raw({ PREVIEW_POLL_INTERVAL_MS: '500' }))).toThrow(
-      /PREVIEW_POLL_INTERVAL_MS/,
-    );
-  });
-
   it('accepts tuning overrides', () => {
     const env = loadEnv(
       raw({
-        PREVIEW_POLL_INTERVAL_MS: '15000',
-        PREVIEW_TIMEOUT_MS: '60000',
+        PSTACK_TOLERANCE_MS: '120000',
+        PSTACK_PREVIEW_DOMAIN: 'preview.hou.test',
         PORT: '9090',
         EVENT_LOG_TOKEN: 'tok',
+        EVENT_LOG_LIMIT: '25',
       }),
     );
-    expect(env.previewPollIntervalMs).toBe(15_000);
-    expect(env.previewTimeoutMs).toBe(60_000);
+    expect(env.pstackToleranceMs).toBe(120_000);
+    expect(env.pstackPreviewDomain).toBe('preview.hou.test');
     expect(env.port).toBe(9090);
     expect(env.eventLogToken).toBe('tok');
+    expect(env.eventLogLimit).toBe(25);
   });
 
-  it('parses the optional application → repo map', () => {
-    const env = loadEnv(
-      raw({ DOKPLOY_APPLICATION_REPO_MAP: 'hou/web:web,api:api' }),
+  it('rejects a non-positive event log limit', () => {
+    expect(() => loadEnv(raw({ EVENT_LOG_LIMIT: '0' }))).toThrow(
+      /EVENT_LOG_LIMIT/,
     );
-    expect(env.dokployApplicationRepoMap.get('hou/web')).toBe('web');
-    expect(env.dokployApplicationRepoMap.get('api')).toBe('api');
+  });
+
+  it('rejects an out-of-range port', () => {
+    expect(() => loadEnv(raw({ PORT: '70000' }))).toThrow(/PORT/);
   });
 });

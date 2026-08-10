@@ -4,8 +4,9 @@
 #
 #   DOCKER_BUILDKIT=1 docker build -t hou-event-automation -f apps/event-automation/Dockerfile .
 #
-# The service is long-running (it polls Dokploy for preview status), so it is
-# deployed as an always-on container rather than a scale-to-zero function.
+# The service holds per-stack reporting state in memory between pstack events,
+# so it is deployed as an always-on container rather than a scale-to-zero
+# function.
 
 ARG BASE_PRUNER=node:jod-bullseye-slim
 ARG BUN_IMAGE=oven/bun:1.3.12-slim

@@ -5,13 +5,19 @@ import type {
 } from '@samyx/github-automation-suite';
 import { withHandlerDescription } from '@samyx/github-automation-suite';
 import { buildDokployRule, dokployFailed } from '@samyx/gha-plugin-dokploy';
+import {
+  buildPreviewStacksRule,
+  type PreviewStacksEventData,
+} from '@samyx/gha-plugin-preview-stacks';
 import { buildGithubRule } from '@samyx/github-automation-suite/plugins/github';
 import type { AppEnv } from './env';
 import type { PreviewTracker, TrackerTarget } from './preview/tracker';
+import type { PstackReporter, PstackSignal } from './pstack/reporter';
 
 export interface CreateRulesOptions {
   env: AppEnv;
   tracker: PreviewTracker;
+  pstack: PstackReporter;
 }
 
 /**
@@ -44,6 +50,46 @@ export function createRules(options: CreateRulesOptions): Rule[] {
         withHandlerDescription(
           trackPreviewHandler(options),
           'track the PR’s Dokploy preview deployment on a GitHub check run + PR comment',
+        ),
+      ],
+    }),
+
+    /**
+     * Requirements 1–4, all served by one rule.
+     *
+     * The three checks (`pstack/stack`, `pstack/db-seed`, `pstack/web`) and the
+     * PR comment are different *views* of one per-stack state machine, and a
+     * single pstack event can move several of them at once — a `stack.timedout`
+     * both fails the stack check and, via `pendingContainers`, fails the `web`
+     * check. Splitting that across four rules would mean four rules racing to
+     * update the same check runs and the same comment, so the events are fed to
+     * one reporter that owns the state and serializes the GitHub writes.
+     *
+     * Test-button deliveries reuse the `job.succeeded` name;
+     * `buildPreviewStacksRule` excludes them by default, which is kept.
+     */
+    buildPreviewStacksRule({
+      name: 'pstack-preview-checks',
+      events: [
+        // Deploy lifecycle -> the stack check.
+        'job.started',
+        'job.failed',
+        'job.leaked',
+        'job.cancelled',
+        // Readiness verdicts -> the stack check + any unsettled service check.
+        'stack.ready',
+        'stack.failed',
+        'stack.timedout',
+        // Per-container verdicts -> the db-seed and web checks.
+        'container.ready',
+        'container.start-failed',
+        // Cancels the readiness watch, so no stack.* verdict will follow.
+        'container.stopped',
+      ],
+      handlers: [
+        withHandlerDescription(
+          pstackHandler(options),
+          'mirror the preview stack + its db-seed/web containers onto GitHub check runs and a tracked PR comment',
         ),
       ],
     }),
@@ -107,6 +153,53 @@ function trackPreviewHandler(options: CreateRulesOptions): HandlerSpec {
       // Fire-and-forget: the loop outlives the request by design.
       void tracker.track(target);
     },
+  };
+}
+
+/**
+ * Feed one pstack event to the reporter.
+ *
+ * Awaited rather than fired-and-forgotten: unlike the Dokploy tracker (which
+ * owns a minutes-long poll loop), this is a single bounded set of GitHub calls,
+ * and awaiting keeps the deliveries for one stack ordered under the engine's
+ * per-delivery handling.
+ */
+function pstackHandler(options: CreateRulesOptions): HandlerSpec {
+  const { pstack } = options;
+  return {
+    critical: false,
+    run: async (ctx) => {
+      await pstack.handle(pstackSignalFrom(ctx.event.data, ctx.event.type));
+    },
+  };
+}
+
+/** Project the plugin's flattened pstack fields onto the reporter's input. */
+export function pstackSignalFrom(
+  data: PreviewStacksEventData,
+  type: string,
+): PstackSignal {
+  return {
+    type,
+    stack: data.pstackStack,
+    container: data.pstackContainer,
+    service: data.pstackService,
+    state: data.pstackState,
+    action: data.pstackAction,
+    error: data.pstackError,
+    reason: data.pstackReason,
+    exitCode: data.pstackExitCode,
+    health: data.pstackHealth,
+    hasHealthcheck: data.pstackHasHealthcheck,
+    healthy: data.pstackHealthy,
+    containers: data.pstackContainers,
+    readyCount: data.pstackReadyCount,
+    failedContainers: data.pstackFailedContainers,
+    pendingContainers: data.pstackPendingContainers,
+    reachable: data.pstackReachable,
+    durationMs: data.pstackDurationMs,
+    waitedMs: data.pstackWaitedMs,
+    by: data.pstackBy,
   };
 }
 

@@ -26,9 +26,10 @@
       "name": "@hou/event-automation",
       "version": "0.1.0",
       "dependencies": {
-        "@samyx/gha-plugin-dokploy": "0.0.0-pre.22-rx",
-        "@samyx/gha-ui": "0.0.0-pre.22-rx",
-        "@samyx/github-automation-suite": "0.0.0-pre.22-rx",
+        "@samyx/gha-plugin-dokploy": "0.0.0-pre.23-rx",
+        "@samyx/gha-plugin-preview-stacks": "0.0.0-pre.23-rx",
+        "@samyx/gha-ui": "0.0.0-pre.23-rx",
+        "@samyx/github-automation-suite": "0.0.0-pre.23-rx",
         "hono": "^4.12.26",
         "octokit": "^4.1.4",
         "zod": "catalog:",
@@ -353,35 +354,39 @@
 
     "@rollup/rollup-win32-x64-msvc": ["@rollup/rollup-win32-x64-msvc@4.62.4", "", { "os": "win32", "cpu": "x64" }, "sha512-zD6NdeWEByGE9QF9vCrlJ5YQB4oq9q91kPZS37Jwj5hOkvR1lTBSpsKhKDw4IJtbQ35LsTS1HD9DZYGKIshU1Q=="],
 
-    "@samyx/gha-blocks": ["@samyx/gha-blocks@0.0.0-pre.22-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.22-rx" } }, "sha512-IT6cxDu6OId3TKVlK5IZO6Dm71HZnu7Iltr8BIi/fJkL95Qo8Lrf/IoBUDcly0TIwvP8jU3ktb//9OvdlQ/LWw=="],
+    "@samyx/gha-blocks": ["@samyx/gha-blocks@0.0.0-pre.23-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.23-rx" } }, "sha512-KNSKWA9JKoB62zzjHz+pXc31oao/JVnBMoYVPP/olOtj87BSk9lN27QtRvx4d4cNGxoi+bJwBJI+lj9e0Jcp6Q=="],
 
-    "@samyx/gha-coordinator-rxjs": ["@samyx/gha-coordinator-rxjs@0.0.0-pre.22-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.22-rx" }, "peerDependencies": { "rxjs": "^7.8.0" }, "optionalPeers": ["rxjs"] }, "sha512-u8aP4Dqo+Wy4XrOrgmz2eFCkPcU/vq2q/88C6/k0hEdNXIVPBBFhXhb+F6DjETlKLYHUqMPl9l6XuYJJ9owxhA=="],
+    "@samyx/gha-coordinator-rxjs": ["@samyx/gha-coordinator-rxjs@0.0.0-pre.23-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.23-rx" }, "peerDependencies": { "rxjs": "^7.8.0" }, "optionalPeers": ["rxjs"] }, "sha512-NH8JuJdDfcNsLb3D0yaQ3/0XqtEABzzjDNJiH5vnkb40sgXCPUe8iOzf6FSIJ+QarU0EhKmJ+Ditoq+gADShOQ=="],
 
-    "@samyx/gha-core": ["@samyx/gha-core@0.0.0-pre.22-rx", "", { "peerDependencies": { "cel-js": "^0.8.2" }, "optionalPeers": ["cel-js"] }, "sha512-s5ESxsAC36zU2G7nKltGdBcPZUJe30BD2wp0VWRcPitTo9tDf/tc7i7Fbt0cqoV84TmN4kV7x+LqMvD1cWlnyA=="],
+    "@samyx/gha-core": ["@samyx/gha-core@0.0.0-pre.23-rx", "", { "peerDependencies": { "cel-js": "^0.8.2" }, "optionalPeers": ["cel-js"] }, "sha512-t07d1dKivqrXa4WspboyDwtaZbR4Pvs9XbpWkJUZQUzxVqiON9liYNVriCdaqjHmZbt+GFL1cmu1tb9wFiUd2w=="],
 
-    "@samyx/gha-express": ["@samyx/gha-express@0.0.0-pre.22-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.22-rx" }, "peerDependencies": { "express": "^4.19.0 || ^5.0.0" }, "optionalPeers": ["express"] }, "sha512-q5dVei3eyts9Qebhyq+YBBUlA+UbS5JGD9NhmPBsx+3txqUu3FuphyiXH+1nJ9qbgpYDTajtMgPSp+6klUuAKg=="],
+    "@samyx/gha-express": ["@samyx/gha-express@0.0.0-pre.23-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.23-rx" }, "peerDependencies": { "express": "^4.19.0 || ^5.0.0" }, "optionalPeers": ["express"] }, "sha512-XLttTq74gOJjEf4GasJScsTPZFV/gRF+nOT+Vp4ny0Sq2E6qW2qg7bdXBzteC9bIhWizQY8zd81GSDdJUL3zYA=="],
 
-    "@samyx/gha-fastify": ["@samyx/gha-fastify@0.0.0-pre.22-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.22-rx" }, "peerDependencies": { "fastify": "^4.0.0 || ^5.0.0" }, "optionalPeers": ["fastify"] }, "sha512-n8tOt7tvU9mlhWz0WZcMp7l+Sjbe4C8qZCadboqxiy3w9UPDt82DGJtcvmliZgvv4YJ3QDR56SZNnLAmtlOIlg=="],
+    "@samyx/gha-fastify": ["@samyx/gha-fastify@0.0.0-pre.23-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.23-rx" }, "peerDependencies": { "fastify": "^4.0.0 || ^5.0.0" }, "optionalPeers": ["fastify"] }, "sha512-ySQwAqjjT8w9QIkGk99O3/PVAAc4SMXsAngv7VIRlt3OxBqwQZ2GwkYct5zlL00QkAc8z8p7SpwhllyRfzaMeg=="],
 
-    "@samyx/gha-hono": ["@samyx/gha-hono@0.0.0-pre.22-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.22-rx", "@samyx/gha-web-kit": "0.0.0-pre.22-rx" }, "peerDependencies": { "hono": "^4.12.26" }, "optionalPeers": ["hono"] }, "sha512-+evG+mfjFV/Xxyjg8cXoGs2EJOVnNMtdWcfqXyFKFYnMxN8JHv2Yfy4wfw0P46HVqW/IcVodMPjemyr2+gsYbw=="],
+    "@samyx/gha-hono": ["@samyx/gha-hono@0.0.0-pre.23-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.23-rx", "@samyx/gha-web-kit": "0.0.0-pre.23-rx" }, "peerDependencies": { "hono": "^4.12.26" }, "optionalPeers": ["hono"] }, "sha512-OmSmqkfWL5QpCRuwMiZi7KDhUyiwnzFZ6gt2e2/2ATnu9k/9omSz9hiD/xBBwyXzgmTqBtdxIL8hUVa4klnXhg=="],
 
-    "@samyx/gha-node": ["@samyx/gha-node@0.0.0-pre.22-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.22-rx" } }, "sha512-o6ER3qlwkv210pPOvKvuwA9zYRU2VafG4adHz9ZNwS2zR3lDmR3fuKqk6NZ5uwYKKvvauchQqkCtLRlsN6SoAA=="],
+    "@samyx/gha-node": ["@samyx/gha-node@0.0.0-pre.23-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.23-rx" } }, "sha512-uiSQbLe5RZsYcQWkkn/Ui/bvAHvMo+abyjmRml0saqtwNOTgoDL1ob8S1ilL97HLPbhTp618IoWaW7duB1Jkbg=="],
 
-    "@samyx/gha-plugin-dokploy": ["@samyx/gha-plugin-dokploy@0.0.0-pre.22-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.22-rx" }, "peerDependencies": { "zod": "^4.3.6" } }, "sha512-kjm2bWRdL+8ZL7v4hshY33u+SaB1F+coiXpCsKHz0WXkQqct+VFz/wMHFCXG4yMDyb6dR++TdwBVIbVT8VjxCA=="],
+    "@samyx/gha-plugin-coolify": ["@samyx/gha-plugin-coolify@0.0.0-pre.23-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.23-rx" }, "peerDependencies": { "zod": "^4.3.6" } }, "sha512-AU9+sWjm/pEW84iycBxKKWAOHNNL3eZvhL/zjgDt6iOW+vyZJlWYXuS1f8Qefh/1SJEXAccGoMv7HX65VTUQXw=="],
 
-    "@samyx/gha-plugin-event-log": ["@samyx/gha-plugin-event-log@0.0.0-pre.22-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.22-rx", "@samyx/gha-web-kit": "0.0.0-pre.22-rx" }, "peerDependencies": { "hono": "^4.12.26" }, "optionalPeers": ["hono"] }, "sha512-k53jaBgACy4i8hmqs84DXkKdkDaixT0I3Yni2qEFYBK4nwJKmZ6YTVvSCdTxIEOXdcDwByVMG+cOTklR1nf13g=="],
+    "@samyx/gha-plugin-dokploy": ["@samyx/gha-plugin-dokploy@0.0.0-pre.23-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.23-rx" }, "peerDependencies": { "zod": "^4.3.6" } }, "sha512-tZXgPIBMDZ2kxvcEn9ivxq3/fzpZwlG+oPUjxQU4ujCwPEQ/a+wXFyvawq+Iy+QLY40xZm+gZMXDiySkZkmWmA=="],
 
-    "@samyx/gha-plugin-gcloud": ["@samyx/gha-plugin-gcloud@0.0.0-pre.22-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.22-rx" } }, "sha512-uxaCSQyPDqltdCINutSPBbnwfilSI9U+l6VDDhBVXrj2zgZ7IkarPEWvTD3xHS6jXM5S5hjQJFrC/EoRCARIyA=="],
+    "@samyx/gha-plugin-event-log": ["@samyx/gha-plugin-event-log@0.0.0-pre.23-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.23-rx", "@samyx/gha-web-kit": "0.0.0-pre.23-rx" }, "peerDependencies": { "hono": "^4.12.26" }, "optionalPeers": ["hono"] }, "sha512-RPPEel9hvADcUuNq+DxFNYGg7t9b32diq2qaoeOVrpdnZJpg1ws5CUJqbE8ie6X8j1lLSm46SoUqZgZ9NhamKA=="],
 
-    "@samyx/gha-plugin-github": ["@samyx/gha-plugin-github@0.0.0-pre.22-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.22-rx" }, "peerDependencies": { "octokit": "^4.1.4", "zod": "^4.3.6" }, "optionalPeers": ["octokit"] }, "sha512-5/XQBopkSW77m0eDbahUdOM0QdgEaaiuZem4VrFf6Pg+RuPhOvnkbWVaPyrENMplOA0+/yYw/Yw8l2/H3lIukQ=="],
+    "@samyx/gha-plugin-gcloud": ["@samyx/gha-plugin-gcloud@0.0.0-pre.23-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.23-rx" } }, "sha512-/4oTVqWAEwlfPq/DGrpNOiUh14IIJUkoIU0e3Bzdv+hTu9LzAqRfojXgcIc/LYPJumC5m0pHqUl/eViFQIsDcQ=="],
 
-    "@samyx/gha-plugin-vercel": ["@samyx/gha-plugin-vercel@0.0.0-pre.22-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.22-rx" }, "peerDependencies": { "zod": "^4.3.6" } }, "sha512-yC2qHlQgdOJrKG3jICemunVWNI/zfLwNPX0cgJqWsmeBO8tTMwkXvAwuXGhg7SnGyopENEImYo3v4bV5eD+BMg=="],
+    "@samyx/gha-plugin-github": ["@samyx/gha-plugin-github@0.0.0-pre.23-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.23-rx" }, "peerDependencies": { "octokit": "^4.1.4", "zod": "^4.3.6" }, "optionalPeers": ["octokit"] }, "sha512-aCS537enxV3MHsamd/tm4y562g0vi/joiw8U++zrZbajh5AUQAdC1EQiSrLO0DdJ+P2uiOFG9UYbcev2S3HDDA=="],
 
-    "@samyx/gha-ui": ["@samyx/gha-ui@0.0.0-pre.22-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.22-rx" }, "peerDependencies": { "hono": "^4.12.26" }, "optionalPeers": ["hono"] }, "sha512-9YArjnqZ0io326UfUVdOQPJCVT7/hOubihCrKPgT7cEAzIVd9Xb9J15pjuwOefVhnYmZ8XJYDG/4nLUipejo7w=="],
+    "@samyx/gha-plugin-preview-stacks": ["@samyx/gha-plugin-preview-stacks@0.0.0-pre.23-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.23-rx" }, "peerDependencies": { "zod": "^4.3.6" } }, "sha512-sFp6+9G/xQsYZdeipc4UiMhaNkYJy79uMiQJ7Wx8/CffDVRd6NGvzMhlFDQdJAxi/TvqNwSBlZhBInqlyvW+kg=="],
 
-    "@samyx/gha-web-kit": ["@samyx/gha-web-kit@0.0.0-pre.22-rx", "", {}, "sha512-O3PdC/1gLd8O47p5e4HAc24fHZWzHvui5OCzwOsA0ARMpsjKRgsXv2dWp++vIXrw4IIqAqipVjI5+5nTJXy0nA=="],
+    "@samyx/gha-plugin-vercel": ["@samyx/gha-plugin-vercel@0.0.0-pre.23-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.23-rx" }, "peerDependencies": { "zod": "^4.3.6" } }, "sha512-mNNzo4Tvria9PyG/FVbGPJfHNGTsywCZsoUAhkTDC+9ZRzYEZxGqtcMvsvSOY4e24kQ3V9Dt4P7OgoIVMS9XiQ=="],
 
-    "@samyx/github-automation-suite": ["@samyx/github-automation-suite@0.0.0-pre.22-rx", "", { "dependencies": { "@samyx/gha-blocks": "0.0.0-pre.22-rx", "@samyx/gha-coordinator-rxjs": "0.0.0-pre.22-rx", "@samyx/gha-core": "0.0.0-pre.22-rx", "@samyx/gha-express": "0.0.0-pre.22-rx", "@samyx/gha-fastify": "0.0.0-pre.22-rx", "@samyx/gha-hono": "0.0.0-pre.22-rx", "@samyx/gha-node": "0.0.0-pre.22-rx", "@samyx/gha-plugin-event-log": "0.0.0-pre.22-rx", "@samyx/gha-plugin-gcloud": "0.0.0-pre.22-rx", "@samyx/gha-plugin-github": "0.0.0-pre.22-rx", "@samyx/gha-plugin-vercel": "0.0.0-pre.22-rx", "@samyx/gha-web-kit": "0.0.0-pre.22-rx" }, "peerDependencies": { "cel-js": "^0.8.2", "express": "^4.19.0 || ^5.0.0", "fastify": "^4.0.0 || ^5.0.0", "hono": "^4.12.26", "octokit": "^4.1.4", "rxjs": "^7.8.0", "zod": "^4.3.6" }, "optionalPeers": ["cel-js", "express", "fastify", "hono", "octokit", "rxjs"] }, "sha512-Nz94pgEblGTxpMKbhvdCw0WFiyiLyf/PcHXvoeBjYrD0/+KPia3dFShES6+P/+AdDoPXJRd5H4QcBDlaNDerug=="],
+    "@samyx/gha-ui": ["@samyx/gha-ui@0.0.0-pre.23-rx", "", { "dependencies": { "@samyx/gha-core": "0.0.0-pre.23-rx" }, "peerDependencies": { "hono": "^4.12.26" }, "optionalPeers": ["hono"] }, "sha512-YSgRfM17YiABQKrmiwszzsR8coqb3kl22hI7h8PDyyxw+h9W2qUwz8HpZekcH6CsXl+R6lCe5t9D5f8VqEghyA=="],
+
+    "@samyx/gha-web-kit": ["@samyx/gha-web-kit@0.0.0-pre.23-rx", "", {}, "sha512-fR8VKAeVoKgPxnHhF0e/H1TSxnbcipscTwKIH42kqoyujNtZ2vI2wLdqCqnBiBRP0JCwEkggBLyc693KkE1skA=="],
+
+    "@samyx/github-automation-suite": ["@samyx/github-automation-suite@0.0.0-pre.23-rx", "", { "dependencies": { "@samyx/gha-blocks": "0.0.0-pre.23-rx", "@samyx/gha-coordinator-rxjs": "0.0.0-pre.23-rx", "@samyx/gha-core": "0.0.0-pre.23-rx", "@samyx/gha-express": "0.0.0-pre.23-rx", "@samyx/gha-fastify": "0.0.0-pre.23-rx", "@samyx/gha-hono": "0.0.0-pre.23-rx", "@samyx/gha-node": "0.0.0-pre.23-rx", "@samyx/gha-plugin-coolify": "0.0.0-pre.23-rx", "@samyx/gha-plugin-dokploy": "0.0.0-pre.23-rx", "@samyx/gha-plugin-event-log": "0.0.0-pre.23-rx", "@samyx/gha-plugin-gcloud": "0.0.0-pre.23-rx", "@samyx/gha-plugin-github": "0.0.0-pre.23-rx", "@samyx/gha-plugin-preview-stacks": "0.0.0-pre.23-rx", "@samyx/gha-plugin-vercel": "0.0.0-pre.23-rx", "@samyx/gha-web-kit": "0.0.0-pre.23-rx" }, "peerDependencies": { "cel-js": "^0.8.2", "express": "^4.19.0 || ^5.0.0", "fastify": "^4.0.0 || ^5.0.0", "hono": "^4.12.26", "octokit": "^4.1.4", "rxjs": "^7.8.0", "zod": "^4.3.6" }, "optionalPeers": ["cel-js", "express", "fastify", "hono", "octokit", "rxjs"] }, "sha512-7alRhvcupqTB0y1m+3PBV8wM3xD5ggDWwXSzpCPH2B8YN9Wx6rQ53uT+fLeyDM8E9e6cIpPVwSoUsVfaakeHKQ=="],
 
     "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
 

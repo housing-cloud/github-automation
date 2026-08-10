@@ -20,6 +20,10 @@ const parsed = loadEnv({
   DOKPLOY_API_KEY: 'k',
   DOKPLOY_WEBHOOK_TOKEN: 'dok-token',
   DOKPLOY_REPO_APPLICATION_MAP: 'repo-a:app-1:repo-a',
+  PSTACK_WEBHOOK_SECRET: 'whsec_boot',
+  PSTACK_REPO: 'repo-a',
+  PSTACK_BASE_URL: 'https://pstack.test',
+  PSTACK_PREVIEW_DOMAIN: 'preview.hou.test',
   PREVIEW_POLL_INTERVAL_MS: '1000',
   PREVIEW_TIMEOUT_MS: '8000',
   PORT: '8099',
@@ -37,13 +41,26 @@ const octokit = {
         return { data: { id: 1 } };
       },
       update: async (p: any) => {
-        console.log('  CHECK update:', p.status, '|', p.conclusion ?? '-');
+        console.log(
+          '  CHECK update:',
+          p.status,
+          '|',
+          p.conclusion ?? '-',
+          '|',
+          p.output?.title ?? '',
+        );
         return {};
       },
       listForRef: async () => ({ data: { check_runs: [] } }),
     },
     actions: { createWorkflowDispatch: async () => ({}) },
     repos: { createDispatchEvent: async () => ({}) },
+    pulls: {
+      get: async (p: any) => {
+        console.log('  PR lookup: #' + p.pull_number, '-> head sha');
+        return { data: { head: { sha: 'sha-of-pr-' + p.pull_number } } };
+      },
+    },
     issues: {
       listLabelsOnIssue: async () => ({ data: [] }),
       createComment: async (p: any) => {
@@ -208,6 +225,87 @@ console.log(
       body: dokBody,
     })
   ).status,
+);
+
+// ── pstack: the real captured sequence, over real signed HTTP ───────────────
+console.log('\n--- pstack (preview-stacks) ---');
+
+async function postPstack(event: string, data: unknown) {
+  const at = Date.now();
+  const envelope = JSON.stringify({
+    id: `evt_${event}_${at}`,
+    event,
+    at,
+    data,
+  });
+  const signature =
+    'sha256=' +
+    createHmac('sha256', 'whsec_boot')
+      .update(`${at}.${envelope}`)
+      .digest('hex');
+  const res = await fetch('http://localhost:8099/webhooks/preview-stacks', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-pstack-event': event,
+      'x-pstack-delivery': `evt_${event}_${at}`,
+      'x-pstack-timestamp': String(at),
+      'x-pstack-signature': signature,
+    },
+    body: envelope,
+  });
+  console.log(`POST /webhooks/preview-stacks [${event}] ->`, res.status);
+  await new Promise((r) => setTimeout(r, 120));
+}
+
+// The exact payloads captured from the live instance (stack pr-16828).
+await postPstack('job.started', {
+  jobId: 'up-pr-16828-1-j5cfw8',
+  stack: 'pr-16828',
+  action: 'up',
+  startedAt: 1786378437511,
+});
+await postPstack('container.ready', {
+  stack: 'pr-16828',
+  container: 'pr-16828-db-seed-1',
+  service: 'db-seed',
+  state: 'exited',
+  health: null,
+  hasHealthcheck: false,
+});
+await postPstack('stack.timedout', {
+  stack: 'pr-16828',
+  state: 'timedout',
+  containers: 4,
+  ready: 3,
+  failedContainers: [],
+  pendingContainers: ['pr-16828-web-1'],
+  durationMs: 181738,
+  reachable: true,
+});
+
+// A bad signature must be rejected before any rule runs.
+const badSig = await fetch('http://localhost:8099/webhooks/preview-stacks', {
+  method: 'POST',
+  headers: {
+    'content-type': 'application/json',
+    'x-pstack-event': 'stack.ready',
+    'x-pstack-delivery': 'evt_forged',
+    'x-pstack-timestamp': String(Date.now()),
+    'x-pstack-signature': 'sha256=deadbeef',
+  },
+  body: JSON.stringify({
+    id: 'evt_forged',
+    event: 'stack.ready',
+    at: Date.now(),
+    data: { stack: 'pr-16828' },
+  }),
+});
+console.log('POST /webhooks/preview-stacks (forged) ->', badSig.status);
+
+console.log(
+  'GET /previews ->',
+  await (await fetch('http://localhost:8099/previews')).text(),
 );
 
 server.stop(true);

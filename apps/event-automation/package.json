@@ -16,9 +16,10 @@
     "check:unsafe": "biome check --write --unsafe ."
   },
   "dependencies": {
-    "@samyx/gha-plugin-dokploy": "0.0.0-pre.22-rx",
-    "@samyx/gha-ui": "0.0.0-pre.22-rx",
-    "@samyx/github-automation-suite": "0.0.0-pre.22-rx",
+    "@samyx/gha-plugin-dokploy": "0.0.0-pre.23-rx",
+    "@samyx/gha-plugin-preview-stacks": "0.0.0-pre.23-rx",
+    "@samyx/gha-ui": "0.0.0-pre.23-rx",
+    "@samyx/github-automation-suite": "0.0.0-pre.23-rx",
     "hono": "^4.12.26",
     "octokit": "^4.1.4",
     "zod": "catalog:"

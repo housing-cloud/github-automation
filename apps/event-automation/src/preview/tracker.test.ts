@@ -59,6 +59,9 @@ function mockOctokit() {
       },
       actions: { createWorkflowDispatch: vi.fn(async () => ({})) },
       repos: { createDispatchEvent: vi.fn(async () => ({})) },
+      pulls: {
+        get: vi.fn(async () => ({ data: { head: { sha: 'head-sha' } } })),
+      },
       issues: {
         listLabelsOnIssue: vi.fn(async () => ({ data: [] })),
         createComment: vi.fn(async (params) => {

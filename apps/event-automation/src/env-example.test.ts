@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { loadEnv } from './env';
+import { envSchema, loadEnv } from './env';
 
 /**
  * Guards `.env.example` against drift.
@@ -80,26 +80,11 @@ describe('.env.example', () => {
         (match) => match[1] as string,
       ),
     );
-    const known = [
-      'GITHUB_APP_ID',
-      'GITHUB_APP_PRIVATE_KEY',
-      'GITHUB_APP_INSTALLATION_ID',
-      'GITHUB_ORG',
-      'GITHUB_ALLOWED_REPOS',
-      'GITHUB_WEBHOOK_SECRET',
-      'DOKPLOY_BASE_URL',
-      'DOKPLOY_API_KEY',
-      'DOKPLOY_WEBHOOK_TOKEN',
-      'DOKPLOY_REPO_APPLICATION_MAP',
-      'DOKPLOY_APPLICATION_REPO_MAP',
-      'PREVIEW_POLL_INTERVAL_MS',
-      'PREVIEW_TIMEOUT_MS',
-      'SLACK_WEBHOOK_URL',
-      'EVENT_LOG_LIMIT',
-      'EVENT_LOG_TOKEN',
-      'PORT',
-    ];
-    for (const key of known) expect(documented).toContain(key);
+    // Derived from the schema rather than a hand-kept list, so a variable added
+    // to the loader cannot be forgotten here.
+    for (const key of Object.keys(envSchema.shape)) {
+      expect(documented).toContain(key);
+    }
   });
 
   it('carries no leftover Vercel configuration', () => {

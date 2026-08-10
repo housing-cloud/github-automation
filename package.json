@@ -33,7 +33,9 @@
     "wait-on": "^8.0.5",
     "webpack": "5.99.9"
   },
-  "scripts": {},
+  "scripts": {
+    "validate:pre-push": "bun run biome check --diagnostic-level=error --files-ignore-unknown=true"
+  },
   "trustedDependencies": [
     "@ast-grep/cli",
     "@biomejs/biome",

@@ -1,6 +1,11 @@
 import { z } from 'zod';
 
-const envSchema = z.object({
+/**
+ * Every variable the service reads. Exported so `.env.example` can be checked
+ * against it: a hand-maintained list silently misses new variables, and a
+ * missing one surfaces as a production startup crash.
+ */
+export const envSchema = z.object({
   GITHUB_APP_ID: z.string().min(1),
   GITHUB_APP_PRIVATE_KEY: z.string().min(1),
   GITHUB_APP_INSTALLATION_ID: z.string().min(1),
@@ -12,6 +17,12 @@ const envSchema = z.object({
   DOKPLOY_WEBHOOK_TOKEN: z.string().min(1),
   DOKPLOY_REPO_APPLICATION_MAP: z.string().min(1),
   DOKPLOY_APPLICATION_REPO_MAP: z.string().optional(),
+  PSTACK_WEBHOOK_SECRET: z.string().min(1),
+  PSTACK_REPO: z.string().min(1),
+  PSTACK_SERVICES: z.string().optional(),
+  PSTACK_BASE_URL: z.url().optional(),
+  PSTACK_PREVIEW_DOMAIN: z.string().optional(),
+  PSTACK_TOLERANCE_MS: z.string().optional(),
   PREVIEW_POLL_INTERVAL_MS: z.string().optional(),
   PREVIEW_TIMEOUT_MS: z.string().optional(),
   SLACK_WEBHOOK_URL: z.url().optional(),
@@ -45,6 +56,21 @@ export interface AppEnv {
   repoApplications: ReadonlyMap<string, DokployApplicationRef>;
   /** `project/application` (or bare application) -> repo, for Dokploy events. */
   dokployApplicationRepoMap: ReadonlyMap<string, string>;
+  /** HMAC secret from the pstack `webhook`-type notifier. */
+  pstackWebhookSecret: string;
+  /**
+   * The repo pstack stacks belong to. pstack payloads name a stack (`pr-16828`)
+   * and never a repository, so this is the only way an event gets one.
+   */
+  pstackRepo: string;
+  /** Compose services that get their own check run. Defaults to `db-seed,web`. */
+  pstackServices: readonly string[];
+  /** pstack dashboard URL, linked from the checks and comment. */
+  pstackBaseUrl?: string;
+  /** Preview domain, used to build `<service>-<stack>.<domain>` URLs. */
+  pstackPreviewDomain?: string;
+  /** Replay window for pstack deliveries. Defaults to the plugin's 5 minutes. */
+  pstackToleranceMs?: number;
   /** How often the tracker re-reads a preview's status. Defaults to 30s. */
   previewPollIntervalMs: number;
   /** How long the tracker waits before failing the check. Defaults to 30m. */
@@ -76,6 +102,15 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     throw new Error('GITHUB_APP_INSTALLATION_ID must be a positive integer');
   }
 
+  // pstack checks are written to this repo, so an unlisted one would mean the
+  // GitHub App is asked to write somewhere the operator never allowed.
+  const pstackRepo = parsed.PSTACK_REPO.trim();
+  if (!githubAllowedRepos.has(pstackRepo)) {
+    throw new Error(
+      `PSTACK_REPO is "${pstackRepo}", which is not in GITHUB_ALLOWED_REPOS`,
+    );
+  }
+
   const repoApplications = parseRepoApplicationMap(
     parsed.DOKPLOY_REPO_APPLICATION_MAP,
   );
@@ -101,6 +136,19 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     dokployApplicationRepoMap: parseApplicationRepoMap(
       parsed.DOKPLOY_APPLICATION_REPO_MAP,
     ),
+    pstackWebhookSecret: parsed.PSTACK_WEBHOOK_SECRET,
+    pstackRepo,
+    pstackServices: parsePstackServices(parsed.PSTACK_SERVICES),
+    pstackBaseUrl: parsed.PSTACK_BASE_URL?.replace(/\/$/, ''),
+    pstackPreviewDomain: parsed.PSTACK_PREVIEW_DOMAIN,
+    pstackToleranceMs:
+      parsed.PSTACK_TOLERANCE_MS === undefined
+        ? undefined
+        : parseDuration(
+            parsed.PSTACK_TOLERANCE_MS,
+            5 * 60_000,
+            'PSTACK_TOLERANCE_MS',
+          ),
     previewPollIntervalMs: parseDuration(
       parsed.PREVIEW_POLL_INTERVAL_MS,
       30_000,
@@ -138,6 +186,18 @@ function parseDuration(
     throw new Error(`${name} must be an integer >= 1000 (milliseconds)`);
   }
   return ms;
+}
+
+/** Comma-separated compose service names. Defaults to the two HOU cares about. */
+function parsePstackServices(value: string | undefined): readonly string[] {
+  const services = (value ?? 'db-seed,web')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (services.length === 0) {
+    throw new Error('PSTACK_SERVICES must name at least one compose service');
+  }
+  return services;
 }
 
 function parseCsvSet(value: string): ReadonlySet<string> {

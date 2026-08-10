@@ -11,6 +11,8 @@ consoleLogger.info(
     dokploy: env.dokployBaseUrl,
     repos: [...env.repoApplications.keys()],
     pollIntervalMs: env.previewPollIntervalMs,
+    pstackRepo: env.pstackRepo,
+    pstackServices: [...env.pstackServices],
   },
   'event automation service listening',
 );

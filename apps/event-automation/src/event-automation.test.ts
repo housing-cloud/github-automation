@@ -27,6 +27,11 @@ function env(overrides: Partial<AppEnv> = {}): AppEnv {
       ['repo-a', { applicationId: 'app-1', name: 'repo-a' }],
     ]),
     dokployApplicationRepoMap: new Map([['hou/repo-a', 'repo-a']]),
+    pstackWebhookSecret: 'pstack-secret',
+    pstackRepo: 'repo-a',
+    pstackServices: ['db-seed', 'web'],
+    pstackBaseUrl: 'https://pstack.test',
+    pstackPreviewDomain: 'preview.hou.test',
     previewPollIntervalMs: 30_000,
     previewTimeoutMs: 30 * 60_000,
     eventLogLimit: 500,
@@ -60,6 +65,9 @@ function mockOctokit(): TrackerOctokit & {
       },
       actions: { createWorkflowDispatch: vi.fn(async () => ({})) },
       repos: { createDispatchEvent: vi.fn(async () => ({})) },
+      pulls: {
+        get: vi.fn(async () => ({ data: { head: { sha: 'head-sha' } } })),
+      },
       issues: {
         listLabelsOnIssue: vi.fn(async () => ({ data: [] })),
         createComment: vi.fn(async (params) => {
@@ -247,6 +255,183 @@ async function drain(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 5));
   for (let i = 0; i < 20; i++) await Promise.resolve();
 }
+
+/** Post a pstack envelope, signed exactly as pstack signs it. */
+async function postPstack(
+  app: HonoLike,
+  envelope: { id: string; event: string; at: number; data: unknown },
+  secret = 'pstack-secret',
+): Promise<Response> {
+  const body = JSON.stringify(envelope);
+  const signature = `sha256=${createHmac('sha256', secret)
+    .update(`${envelope.at}.${body}`)
+    .digest('hex')}`;
+  return await app.fetch(
+    new Request('http://local/webhooks/preview-stacks', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-pstack-event': envelope.event,
+        'x-pstack-delivery': envelope.id,
+        'x-pstack-timestamp': String(envelope.at),
+        'x-pstack-signature': signature,
+      },
+      body,
+    }),
+  );
+}
+
+describe('event-automation app (pstack preview stacks)', () => {
+  /**
+   * The full requirement 1–4 path over real HTTP: a signed pstack delivery
+   * lands, the signature is verified by the plugin, the rule matches, and the
+   * checks + comment are written.
+   */
+  it('opens the three checks from a signed job.started delivery', async () => {
+    const { app, octokit } = await buildApp();
+
+    const res = await postPstack(app, {
+      id: 'evt_msnflk07_2_i9xr14',
+      event: 'job.started',
+      at: Date.now(),
+      data: {
+        jobId: 'up-pr-16828-1-j5cfw8',
+        stack: 'pr-16828',
+        action: 'up',
+        startedAt: 1786378437511,
+      },
+    });
+    expect(res.status).toBe(200);
+    await drain();
+
+    const created = octokit.checkRuns.filter((c) => c.op === 'create');
+    expect(created.map((c) => c.name)).toEqual([
+      'pstack/stack',
+      'pstack/db-seed',
+      'pstack/web',
+    ]);
+    expect(created.every((c) => c.status === 'in_progress')).toBe(true);
+  });
+
+  it('rejects a pstack delivery with a bad signature', async () => {
+    const { app, octokit } = await buildApp();
+
+    const res = await postPstack(
+      app,
+      {
+        id: 'evt_bad',
+        event: 'stack.ready',
+        at: Date.now(),
+        data: { stack: 'pr-16828', containers: 1, ready: 1 },
+      },
+      'wrong-secret',
+    );
+
+    expect(res.status).toBe(401);
+    await drain();
+    expect(octokit.checkRuns).toHaveLength(0);
+  });
+
+  it('rejects a replayed pstack delivery outside the tolerance window', async () => {
+    const { app, octokit } = await buildApp();
+
+    const res = await postPstack(app, {
+      id: 'evt_old',
+      event: 'stack.ready',
+      at: Date.now() - 60 * 60_000,
+      data: { stack: 'pr-16828', containers: 1, ready: 1 },
+    });
+
+    expect(res.status).toBe(401);
+    await drain();
+    expect(octokit.checkRuns).toHaveLength(0);
+  });
+
+  it('drives the whole sequence to a failed web check and a PR comment', async () => {
+    const { app, octokit } = await buildApp();
+    const at = Date.now();
+
+    await postPstack(app, {
+      id: 'evt_msnflk07_2_i9xr14',
+      event: 'job.started',
+      at,
+      data: { jobId: 'up-pr-16828-1', stack: 'pr-16828', action: 'up' },
+    });
+    await drain();
+    await postPstack(app, {
+      id: 'evt_seed_ready',
+      event: 'container.ready',
+      at,
+      data: {
+        stack: 'pr-16828',
+        container: 'pr-16828-db-seed-1',
+        service: 'db-seed',
+        state: 'exited',
+        health: null,
+        hasHealthcheck: false,
+      },
+    });
+    await drain();
+    // The real timeout payload: `web` shows up only in pendingContainers.
+    await postPstack(app, {
+      id: 'evt_msnhilf4_a_vuiop4',
+      event: 'stack.timedout',
+      at,
+      data: {
+        stack: 'pr-16828',
+        state: 'timedout',
+        containers: 4,
+        ready: 3,
+        failedContainers: [],
+        pendingContainers: ['pr-16828-web-1'],
+        durationMs: 181738,
+        reachable: true,
+      },
+    });
+    await drain();
+
+    // db-seed passed, web failed, stack failed — and nothing left pending.
+    const summaries = octokit.checkRuns
+      .filter((c) => c.op === 'update')
+      .map((c) => (c.output as { title: string } | undefined)?.title ?? '');
+    expect(summaries).toContain('db-seed ready');
+    expect(summaries).toContain('web did not become ready');
+    expect(summaries).toContain('Preview stack did not come up');
+
+    const comment = octokit.comments.at(-1);
+    expect(comment?.issue_number).toBe(16828);
+    expect(String(comment?.body)).toContain('pr-16828-web-1');
+  });
+
+  it('ignores a pstack Test-button delivery', async () => {
+    const { app, octokit } = await buildApp();
+
+    const res = await postPstack(app, {
+      id: 'evt_test',
+      event: 'job.succeeded',
+      at: Date.now(),
+      data: { stack: 'pr-16828', action: 'up', test: true },
+    });
+
+    expect(res.status).toBe(200);
+    await drain();
+    expect(octokit.checkRuns).toHaveLength(0);
+  });
+
+  it('ignores a stack that does not name a pull request', async () => {
+    const { app, octokit } = await buildApp();
+
+    await postPstack(app, {
+      id: 'evt_staging',
+      event: 'stack.ready',
+      at: Date.now(),
+      data: { stack: 'staging', containers: 2, ready: 2 },
+    });
+    await drain();
+
+    expect(octokit.checkRuns).toHaveLength(0);
+  });
+});
 
 describe('event-automation app (GitHub + Dokploy)', () => {
   it('opens an in-progress check and a PR comment when a PR is opened', async () => {

@@ -83,6 +83,19 @@ export interface TrackerOctokit {
         client_payload?: Record<string, unknown>;
       }) => Promise<unknown>;
     };
+    pulls: {
+      /**
+       * pstack webhooks name a *stack*, never a commit, but a check run must be
+       * attached to a `head_sha` — so the PR's head commit is looked up here.
+       */
+      get: (params: {
+        owner: string;
+        repo: string;
+        pull_number: number;
+      }) => Promise<{
+        data: { head: { sha: string }; html_url?: string; state?: string };
+      }>;
+    };
     issues: {
       listLabelsOnIssue: (params: {
         owner: string;

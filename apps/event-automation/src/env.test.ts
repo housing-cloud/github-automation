@@ -13,6 +13,8 @@ function raw(overrides: Record<string, string | undefined> = {}) {
     DOKPLOY_API_KEY: 'dokploy-key',
     DOKPLOY_WEBHOOK_TOKEN: 'dokploy-token',
     DOKPLOY_REPO_APPLICATION_MAP: 'web:app-1:web-app,api:app-2',
+    PSTACK_WEBHOOK_SECRET: 'whsec_pstack',
+    PSTACK_REPO: 'web',
     ...overrides,
   } as NodeJS.ProcessEnv;
 }

@@ -90,7 +90,63 @@ on it. Both can point at the same repo — they serve different roles.
 
 ---
 
-## 3. Tuning (all optional)
+## 3. preview-stacks (pstack)
+
+This is what drives the three new check runs and the "Preview stack" PR comment.
+
+| Env var | REQUIRED | Where it comes from |
+| --- | --- | --- |
+| `PSTACK_WEBHOOK_SECRET` | ✅ | Shown **once** when you create the notifier (below). pstack keeps no way to show it again. |
+| `PSTACK_REPO` | ✅ | The repo whose PRs these stacks belong to, e.g. `web`. Must also be in `GITHUB_ALLOWED_REPOS`. |
+| `PSTACK_SERVICES` | optional | Compose services that each get a check run. Defaults to `db-seed,web`. |
+| `PSTACK_BASE_URL` | optional | pstack dashboard URL, linked from the checks and the comment. |
+| `PSTACK_PREVIEW_DOMAIN` | optional | Preview domain, used to build `<service>-<stack>.<domain>` URLs in the comment. |
+| `PSTACK_TOLERANCE_MS` | optional | Replay window. Defaults to `300000` (5 minutes). |
+
+### The notifier
+
+In pstack → **Notifiers → New**, create one of **type `webhook`** (a
+`slack`/`discord` notifier sends unsigned prose and will *not* work):
+
+- **URL**: `https://<service-host>/webhooks/preview-stacks`
+- **Events**: at minimum
+
+  ```
+  job.started, job.failed, job.leaked, job.cancelled,
+  stack.ready, stack.failed, stack.timedout,
+  container.ready, container.start-failed, container.stopped
+  ```
+
+  Subscribing to `*` also works; the extra events are ignored.
+
+Copy the `whsec_…` secret it shows into `PSTACK_WEBHOOK_SECRET`. Deliveries are
+verified as `sha256=HMAC(secret, timestamp + "." + rawBody)`, and anything older
+than the tolerance is rejected as a replay.
+
+### What each check means
+
+| Check run | Passes when | Fails when |
+| --- | --- | --- |
+| `pstack/stack` | `stack.ready` — every container reached ready | `stack.failed` / `stack.timedout`, or the `up` job failed, leaked or was cancelled |
+| `pstack/db-seed` | the `db-seed` container reports ready (for a one-shot container that means **exited 0**) | `container.start-failed`, or the stack settled without it becoming ready |
+| `pstack/web` | the `web` container reports ready | `container.start-failed`, or it is still in `pendingContainers` when the stack times out |
+
+Two behaviours worth knowing, both taken from pstack's own semantics:
+
+- **`job.succeeded` does not pass `pstack/stack`.** For an `up`, it means the
+  commands ran — `compose up -d` returns once containers are *created*. The
+  readiness watch that follows is what decides, and it always ends in exactly one
+  of `stack.ready` / `stack.failed` / `stack.timedout`.
+- **The stack name is the PR link.** pstack's payloads for `job.*`, `stack.*` and
+  the readiness `container.*` events carry only `stack` (e.g. `pr-16828`) — no
+  deployment id, no repo, no commit SHA. So the PR number is parsed from the
+  stack name, and the head commit is looked up through the GitHub API. Name your
+  deployments `pr-<number>` (or `<prefix>-pr-<number>`); any other shape is
+  ignored, by design.
+
+---
+
+## 4. Tuning (all optional)
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
@@ -103,7 +159,7 @@ on it. Both can point at the same repo — they serve different roles.
 
 ---
 
-## 4. Checklist
+## 5. Checklist
 
 - [ ] GitHub App created, with the five permissions above.
 - [ ] App installed on the org, scoped to the repos in `GITHUB_ALLOWED_REPOS`.
@@ -115,6 +171,11 @@ on it. Both can point at the same repo — they serve different roles.
 - [ ] Preview deployments enabled on each Dokploy application.
 - [ ] `DOKPLOY_REPO_APPLICATION_MAP` filled in with each repo's `applicationId`.
 - [ ] `EVENT_LOG_TOKEN` set if the service is internet-facing.
+- [ ] pstack notifier created (**type `webhook`**), pointed at
+      `/webhooks/preview-stacks`, subscribed to the events above, with its
+      `whsec_…` secret → `PSTACK_WEBHOOK_SECRET`.
+- [ ] `PSTACK_REPO` set to the repo whose PRs the stacks belong to.
+- [ ] pstack deployments named `pr-<number>` so they can be linked to a PR.
 
 ### Smoke test
 
@@ -125,3 +186,8 @@ on it. Both can point at the same repo — they serve different roles.
 4. `GET /previews` → the PR appears in `tracking`.
 5. Within `PREVIEW_TIMEOUT_MS` the check settles green or red and the comment
    shows the preview URL.
+6. Deploy a pstack stack named `pr-<number>` for an open PR. The PR gains
+   `pstack/stack`, `pstack/db-seed` and `pstack/web` checks in progress; they
+   settle as the containers report, and a "Preview stack" comment appears.
+7. pstack → the notifier's **Test** button is deliberately a no-op here: test
+   deliveries reuse the `job.succeeded` event name and are excluded.

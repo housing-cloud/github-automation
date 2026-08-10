@@ -7,12 +7,14 @@ import { githubPlugin } from '@samyx/github-automation-suite/plugins/github';
 import { eventLogPlugin } from '@samyx/github-automation-suite/plugins/event-log';
 import { eventLogRoutes } from '@samyx/github-automation-suite/plugins/event-log/hono';
 import { dokployPlugin } from '@samyx/gha-plugin-dokploy';
+import { previewStacksPlugin } from '@samyx/gha-plugin-preview-stacks';
 import { Hono, type MiddlewareHandler } from 'hono';
 import { DokployClient } from './dokploy/client';
 import type { AppEnv } from './env';
 import type { TrackerOctokit } from './github/checks';
 import { createOctokit } from './github/octokit';
 import { PreviewTracker } from './preview/tracker';
+import { PstackReporter } from './pstack/reporter';
 import { createRules } from './rules';
 
 export interface CreateEventAutomationAppOptions {
@@ -28,11 +30,14 @@ export interface CreateEventAutomationAppOptions {
   fetch?: typeof fetch;
   /** Override the tracker (tests inject a fake clock / fake sleep). */
   tracker?: PreviewTracker;
+  /** Override the pstack reporter (tests inject a recording Octokit). */
+  pstack?: PstackReporter;
 }
 
 export interface EventAutomationApp {
   app: Hono;
   tracker: PreviewTracker;
+  pstack: PstackReporter;
 }
 
 /**
@@ -83,6 +88,19 @@ export async function createEventAutomation(
       timeoutMs: env.previewTimeoutMs,
     });
 
+  // pstack reports on one repo's preview stacks: its payloads name a stack
+  // (`pr-16828`) and never a repository, so the repo comes from config.
+  const pstack =
+    options.pstack ??
+    new PstackReporter({
+      octokit,
+      repo: { owner: env.githubOrg, name: env.pstackRepo },
+      logger,
+      services: env.pstackServices,
+      previewDomain: env.pstackPreviewDomain,
+      pstackBaseUrl: env.pstackBaseUrl,
+    });
+
   const engine = await createEngine({
     logger: options.logger,
     fetch: options.fetch,
@@ -105,16 +123,27 @@ export async function createEventAutomation(
         applicationRepoMap: env.dokployApplicationRepoMap,
         fetch: options.fetch,
       }),
+      // pstack signs its envelope (HMAC over `timestamp + "." + rawBody`), so
+      // unlike Dokploy this ingress is genuinely authenticated.
+      previewStacksPlugin({
+        secret: env.pstackWebhookSecret,
+        toleranceMs: env.pstackToleranceMs,
+      }),
     ],
-    rules: createRules({ env, tracker }),
+    rules: createRules({ env, tracker, pstack }),
   });
 
   const app = toHono(engine);
   app.get('/health', (c) => c.json({ status: 'ok' }));
 
-  // Live preview trackers — the poll loops currently watching a PR.
+  // Live preview trackers — the poll loops currently watching a PR, and the
+  // pstack stacks currently mirrored onto checks.
   app.get('/previews', (c) =>
-    c.json({ count: tracker.active.length, tracking: tracker.active }),
+    c.json({
+      count: tracker.active.length,
+      tracking: tracker.active,
+      pstackStacks: pstack.active,
+    }),
   );
 
   // `/events` — HTML table of received webhooks; `/events/json` — the same as
@@ -146,6 +175,8 @@ export async function createEventAutomation(
         allowedRepos: [...env.githubAllowedRepos],
         dokployBaseUrl: env.dokployBaseUrl,
         trackedRepos: [...env.repoApplications.keys()],
+        pstackRepo: env.pstackRepo,
+        pstackServices: [...env.pstackServices],
         previewPollIntervalMs: env.previewPollIntervalMs,
         eventLogLimit: env.eventLogLimit,
       },
@@ -163,6 +194,8 @@ export async function createEventAutomation(
       'GET /previews': 'Preview deployments currently being polled',
       'POST /webhooks/github': 'GitHub App webhook ingress',
       'POST /webhooks/dokploy': 'Dokploy notification webhook ingress',
+      'POST /webhooks/preview-stacks':
+        'pstack (preview-stacks) signed webhook ingress',
       'GET /events': 'Received-webhooks log (HTML table)',
       'GET /events/json': 'Received-webhooks log (JSON)',
       'GET /dashboard':
@@ -170,7 +203,7 @@ export async function createEventAutomation(
     },
   });
 
-  return { app, tracker };
+  return { app, tracker, pstack };
 }
 
 /**

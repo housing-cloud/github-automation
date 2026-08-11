@@ -21,6 +21,7 @@ export type CheckConclusion =
 
 export interface CheckRunRef {
   id: number;
+  name?: string;
 }
 
 export interface IssueComment {
@@ -64,6 +65,9 @@ export interface AppOctokit {
         repo: string;
         ref: string;
         check_name?: string;
+        filter?: 'all' | 'latest';
+        per_page?: number;
+        page?: number;
       }) => Promise<{ data: { check_runs: CheckRunRef[] } }>;
     };
     actions: {
@@ -94,6 +98,15 @@ export interface AppOctokit {
         pull_number: number;
       }) => Promise<{
         data: { head: { sha: string }; html_url?: string; state?: string };
+      }>;
+      list: (params: {
+        owner: string;
+        repo: string;
+        state: 'open';
+        per_page: number;
+        page: number;
+      }) => Promise<{
+        data: Array<{ number: number; head: { sha: string } }>;
       }>;
     };
     issues: {
@@ -127,6 +140,109 @@ export interface AppOctokit {
 export interface RepoRef {
   owner: string;
   name: string;
+}
+
+export interface ClearedPstackChecks {
+  pullRequests: number[];
+  checkRuns: number;
+}
+
+/**
+ * Complete pstack checks as skipped for one PR, or for every open PR.
+ *
+ * GitHub exposes no delete operation for check runs or suites. `skipped` is the
+ * closest useful equivalent to clearing: it removes a stale pending/failing
+ * verdict without pretending the preview succeeded.
+ */
+export async function clearPstackChecks(
+  octokit: AppOctokit,
+  repo: RepoRef,
+  target: { prNumber: number; headSha?: string } | { all: true },
+): Promise<ClearedPstackChecks> {
+  const pullRequests =
+    'prNumber' in target
+      ? [
+          {
+            number: target.prNumber,
+            head: target.headSha
+              ? { sha: target.headSha }
+              : (
+                  await octokit.rest.pulls.get({
+                    owner: repo.owner,
+                    repo: repo.name,
+                    pull_number: target.prNumber,
+                  })
+                ).data.head,
+          },
+        ]
+      : await listOpenPullRequests(octokit, repo);
+
+  let checkRuns = 0;
+  for (const pull of pullRequests) {
+    checkRuns += await clearPstackChecksForRef(octokit, repo, pull.head.sha);
+  }
+
+  return {
+    pullRequests: pullRequests.map((pull) => pull.number),
+    checkRuns,
+  };
+}
+
+async function listOpenPullRequests(
+  octokit: AppOctokit,
+  repo: RepoRef,
+): Promise<Array<{ number: number; head: { sha: string } }>> {
+  const pulls: Array<{ number: number; head: { sha: string } }> = [];
+  for (let page = 1; ; page++) {
+    const { data } = await octokit.rest.pulls.list({
+      owner: repo.owner,
+      repo: repo.name,
+      state: 'open',
+      per_page: 100,
+      page,
+    });
+    pulls.push(...data);
+    if (data.length < 100) return pulls;
+  }
+}
+
+async function clearPstackChecksForRef(
+  octokit: AppOctokit,
+  repo: RepoRef,
+  ref: string,
+): Promise<number> {
+  let cleared = 0;
+  for (let page = 1; ; page++) {
+    const { data } = await octokit.rest.checks.listForRef({
+      owner: repo.owner,
+      repo: repo.name,
+      ref,
+      filter: 'all',
+      per_page: 100,
+      page,
+    });
+    const pstackChecks = data.check_runs.filter((check) =>
+      check.name?.startsWith('pstack/'),
+    );
+    await Promise.all(
+      pstackChecks.map((check) =>
+        octokit.rest.checks.update({
+          owner: repo.owner,
+          repo: repo.name,
+          check_run_id: check.id,
+          status: 'completed',
+          conclusion: 'skipped',
+          completed_at: new Date().toISOString(),
+          output: {
+            title: 'pstack check cleared',
+            summary: 'Cleared by the pstack checks webhook.',
+          },
+        }),
+      ),
+    );
+    cleared += pstackChecks.length;
+    if (data.check_runs.length < 100) return cleared;
+  }
 }
 
 /**

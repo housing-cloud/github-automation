@@ -119,6 +119,8 @@ interface StackState {
  */
 export class PstackReporter {
   private readonly stacks = new Map<string, StackState>();
+  private readonly blockedStacks = new Set<string>();
+  private clearingAll = false;
 
   constructor(private readonly options: PstackReporterOptions) {}
 
@@ -132,6 +134,12 @@ export class PstackReporter {
    * can await it and the webhook response reflects a real write.
    */
   async handle(signal: PstackSignal): Promise<void> {
+    if (
+      this.clearingAll ||
+      (signal.stack !== undefined && this.blockedStacks.has(signal.stack))
+    )
+      return;
+
     const identity = parseStackIdentity(signal.stack);
     if (!identity) {
       this.options.logger.debug(
@@ -145,7 +153,8 @@ export class PstackReporter {
       signal.stack as string,
       identity.prNumber,
     );
-    if (!state) return;
+    if (!state || this.clearingAll || this.blockedStacks.has(state.stack))
+      return;
 
     // One writer at a time per stack: `container.ready` for db-seed and web can
     // arrive in the same tick, and both mutate the same comment.
@@ -170,10 +179,48 @@ export class PstackReporter {
     return dropped;
   }
 
+  /** Serialize a one-stack GitHub cleanup against its in-flight event writes. */
+  async clearStack<T>(
+    stack: string,
+    clear: (headSha: string | undefined) => Promise<T>,
+  ): Promise<{ result: T; forgotten: string[] }> {
+    this.blockedStacks.add(stack);
+    const state = this.stacks.get(stack);
+    try {
+      await state?.queue;
+      const result = await clear(state?.headSha);
+      const forgotten =
+        state && this.stacks.get(stack) === state && this.stacks.delete(stack)
+          ? [stack]
+          : [];
+      return { result, forgotten };
+    } finally {
+      this.blockedStacks.delete(stack);
+    }
+  }
+
+  /** Serialize an all-open-PR cleanup against every in-flight event write. */
+  async clearAll<T>(
+    clear: () => Promise<T>,
+  ): Promise<{ result: T; forgotten: string[] }> {
+    this.clearingAll = true;
+    const states = [...this.stacks.values()];
+    try {
+      await Promise.all(states.map((state) => state.queue));
+      const result = await clear();
+      const forgotten = this.active;
+      this.stacks.clear();
+      return { result, forgotten };
+    } finally {
+      this.clearingAll = false;
+    }
+  }
+
   private async stateFor(
     stack: string,
     prNumber: number,
   ): Promise<StackState | undefined> {
+    if (this.clearingAll || this.blockedStacks.has(stack)) return undefined;
     const existing = this.stacks.get(stack);
     if (existing) return existing;
 
@@ -194,6 +241,8 @@ export class PstackReporter {
       return undefined;
     }
 
+    if (this.clearingAll || this.blockedStacks.has(stack)) return undefined;
+
     const state: StackState = {
       stack,
       prNumber,
@@ -211,7 +260,8 @@ export class PstackReporter {
 
     // Open all three checks immediately: a check that only appears on success
     // tells a reviewer nothing while the deploy is running.
-    await this.openChecks(state);
+    state.queue = this.openChecks(state);
+    await state.queue;
     return state;
   }
 

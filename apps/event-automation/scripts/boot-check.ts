@@ -17,6 +17,7 @@ const parsed = loadEnv({
   GITHUB_ALLOWED_REPOS: 'repo-a',
   GITHUB_WEBHOOK_SECRET: 'gh-secret',
   PSTACK_WEBHOOK_SECRET: 'whsec_boot',
+  PSTACK_CHECKS_WEBHOOK_SECRET: 'checks-secret',
   PSTACK_REPO: 'repo-a',
   PSTACK_BASE_URL: 'https://pstack.test',
   PSTACK_PREVIEW_DOMAIN: 'preview.hou.test',
@@ -52,6 +53,7 @@ const octokit = {
         console.log('  PR lookup: #' + p.pull_number, '-> head sha');
         return { data: { head: { sha: 'sha-of-pr-' + p.pull_number } } };
       },
+      list: async () => ({ data: [] }),
     },
     issues: {
       listLabelsOnIssue: async () => ({ data: [] }),

@@ -51,6 +51,7 @@ This is what drives the three new check runs and the "Preview stack" PR comment.
 | Env var | REQUIRED | Where it comes from |
 | --- | --- | --- |
 | `PSTACK_WEBHOOK_SECRET` | ✅ | Shown **once** when you create the notifier (below). pstack keeps no way to show it again. |
+| `PSTACK_CHECKS_WEBHOOK_SECRET` | ✅ | A random bearer secret for the operator-only checks cleanup webhook. Generate with `openssl rand -hex 32`. |
 | `PSTACK_REPO` | ✅ | The repo whose PRs these stacks belong to, e.g. `web`. Must also be in `GITHUB_ALLOWED_REPOS`. |
 | `PSTACK_SERVICES` | optional | Compose services that each get a check run. Defaults to `db-seed,web`. |
 | `PSTACK_BASE_URL` | optional | pstack dashboard URL, linked from the checks and the comment. |
@@ -76,6 +77,33 @@ In pstack → **Notifiers → New**, create one of **type `webhook`** (a
 Copy the `whsec_…` secret it shows into `PSTACK_WEBHOOK_SECRET`. Deliveries are
 verified as `sha256=HMAC(secret, timestamp + "." + rawBody)`, and anything older
 than the tolerance is rejected as a replay.
+
+### Clear stale pstack checks
+
+GitHub does not expose an API to delete check suites or check runs. This service
+therefore clears stale `pstack/*` runs by completing them with the `skipped`
+conclusion, which removes a stale pending/failing verdict without reporting a
+successful deployment.
+
+```bash
+# One stack
+curl -X POST https://<service-host>/webhooks/pstack/checks/clear \
+  -H "Authorization: Bearer $PSTACK_CHECKS_WEBHOOK_SECRET" \
+  -H 'Content-Type: application/json' \
+  -d '{"stack":"pr-16828"}'
+
+# Every open PR in PSTACK_REPO
+curl -X POST https://<service-host>/webhooks/pstack/checks/clear \
+  -H "Authorization: Bearer $PSTACK_CHECKS_WEBHOOK_SECRET" \
+  -H 'Content-Type: application/json' \
+  -d '{"all":true}'
+```
+
+The secret is accepted only in the `Authorization` header. A successful call
+also clears matching in-memory reporter state, so a later pstack event can open
+fresh checks. Specific cleanup accepts only `pr-<number>`; prefixed deployments
+cannot be isolated inside GitHub's App-and-commit-scoped check suite, so use the
+explicit `{"all":true}` operation for those.
 
 ### What each check means
 
@@ -125,6 +153,8 @@ Two behaviours worth knowing, both taken from pstack's own semantics:
 - [ ] pstack notifier created (**type `webhook`**), pointed at
       `/webhooks/preview-stacks`, subscribed to the events above, with its
       `whsec_…` secret → `PSTACK_WEBHOOK_SECRET`.
+- [ ] `PSTACK_CHECKS_WEBHOOK_SECRET` generated and stored for operators that may
+      call `/webhooks/pstack/checks/clear`.
 - [ ] `PSTACK_REPO` set to the repo whose PRs the stacks belong to.
 - [ ] pstack deployments named `pr-<number>` so they can be linked to a PR.
 

@@ -17,6 +17,7 @@ function env(overrides: Partial<AppEnv> = {}): AppEnv {
     githubAllowedRepos: new Set(['repo-a']),
     githubWebhookSecret: 'github-secret',
     pstackWebhookSecret: 'pstack-secret',
+    pstackChecksWebhookSecret: 'checks-secret',
     pstackRepo: 'repo-a',
     pstackServices: ['db-seed', 'web'],
     pstackBaseUrl: 'https://pstack.test',
@@ -54,6 +55,7 @@ function mockOctokit(): AppOctokit & {
       repos: { createDispatchEvent: vi.fn(async () => ({})) },
       pulls: {
         get: vi.fn(async () => ({ data: { head: { sha: 'head-sha' } } })),
+        list: vi.fn(async () => ({ data: [] })),
       },
       issues: {
         listLabelsOnIssue: vi.fn(async () => ({ data: [] })),
@@ -465,6 +467,316 @@ describe('event-automation app (GitHub ingress)', () => {
 });
 
 describe('event-automation app (platform routes)', () => {
+  it('clears pstack checks for one stack and forgets its reporter state', async () => {
+    const octokit = mockOctokit();
+    vi.mocked(octokit.rest.checks.listForRef).mockResolvedValue({
+      data: {
+        check_runs: [
+          { id: 10, name: 'pstack/stack' },
+          { id: 11, name: 'pstack/web' },
+          { id: 12, name: 'other/check' },
+        ],
+      },
+    });
+    const { app, pstack } = await buildApp({ octokit });
+    await postPstack(app, {
+      id: 'evt_cleanup_one',
+      event: 'job.started',
+      at: Date.now(),
+      data: { stack: 'pr-16828', action: 'up' },
+    });
+    await drain();
+
+    const res = await app.fetch(
+      new Request('http://local/webhooks/pstack/checks/clear', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer checks-secret',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ stack: 'pr-16828' }),
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      pullRequests: [16828],
+      checkRuns: 2,
+      stack: 'pr-16828',
+      forgotten: ['pr-16828'],
+    });
+    expect(pstack.active).toEqual([]);
+    expect(octokit.rest.pulls.get).toHaveBeenCalledTimes(1);
+    const cleared = octokit.checkRuns.filter(
+      (run) => run.op === 'update' && run.conclusion === 'skipped',
+    );
+    expect(cleared.map((run) => run.check_run_id)).toEqual([10, 11]);
+  });
+
+  it('clears pstack checks for every open PR', async () => {
+    const octokit = mockOctokit();
+    vi.mocked(octokit.rest.pulls.list).mockResolvedValue({
+      data: [
+        { number: 1, head: { sha: 'sha-1' } },
+        { number: 2, head: { sha: 'sha-2' } },
+      ],
+    });
+    vi.mocked(octokit.rest.checks.listForRef).mockImplementation(
+      async ({ ref }) => ({
+        data: {
+          check_runs: [{ id: ref === 'sha-1' ? 21 : 22, name: 'pstack/stack' }],
+        },
+      }),
+    );
+    const { app } = await buildApp({ octokit });
+
+    const res = await app.fetch(
+      new Request('http://local/webhooks/pstack/checks/clear', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer checks-secret',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ all: true }),
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      pullRequests: [1, 2],
+      checkRuns: 2,
+      forgotten: [],
+    });
+    expect(
+      octokit.checkRuns
+        .filter((run) => run.conclusion === 'skipped')
+        .map((run) => run.check_run_id),
+    ).toEqual([21, 22]);
+  });
+
+  it('clears pstack checks across every GitHub results page', async () => {
+    const octokit = mockOctokit();
+    vi.mocked(octokit.rest.checks.listForRef).mockImplementation(
+      async ({ page }) => ({
+        data: {
+          check_runs:
+            page === 1
+              ? [
+                  { id: 31, name: 'pstack/stack' },
+                  ...Array.from({ length: 99 }, (_, index) => ({
+                    id: 1000 + index,
+                    name: `other/${index}`,
+                  })),
+                ]
+              : [{ id: 32, name: 'pstack/web' }],
+        },
+      }),
+    );
+    const { app } = await buildApp({ octokit });
+
+    const res = await app.fetch(
+      new Request('http://local/webhooks/pstack/checks/clear', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer checks-secret',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ stack: 'pr-16828' }),
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ checkRuns: 2 });
+    expect(octokit.rest.checks.listForRef).toHaveBeenCalledTimes(2);
+    expect(
+      octokit.checkRuns
+        .filter((run) => run.conclusion === 'skipped')
+        .map((run) => run.check_run_id),
+    ).toEqual([31, 32]);
+  });
+
+  it('does not let an in-flight stack event rewrite checks after cleanup', async () => {
+    const octokit = mockOctokit();
+    const { app, pstack } = await buildApp({ octokit });
+    await postPstack(app, {
+      id: 'evt_cleanup_race_open',
+      event: 'job.started',
+      at: Date.now(),
+      data: { stack: 'pr-16828', action: 'up' },
+    });
+    await drain();
+
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered = () => {};
+    const cleanupEntered = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    vi.mocked(octokit.rest.checks.listForRef).mockImplementationOnce(
+      async () => {
+        entered();
+        await gate;
+        return {
+          data: {
+            check_runs: [
+              { id: 100, name: 'pstack/stack' },
+              { id: 101, name: 'pstack/db-seed' },
+              { id: 102, name: 'pstack/web' },
+            ],
+          },
+        };
+      },
+    );
+
+    const cleanup = app.fetch(
+      new Request('http://local/webhooks/pstack/checks/clear', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer checks-secret',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ stack: 'pr-16828' }),
+      }),
+    );
+    await cleanupEntered;
+
+    const event = await postPstack(app, {
+      id: 'evt_cleanup_race_ready',
+      event: 'stack.ready',
+      at: Date.now(),
+      data: { stack: 'pr-16828', containers: 2, ready: 2 },
+    });
+    expect(event.status).toBe(200);
+    release();
+    expect((await cleanup).status).toBe(200);
+    await drain();
+
+    expect(pstack.active).toEqual([]);
+    expect(
+      octokit.checkRuns.filter((run) => run.conclusion === 'success'),
+    ).toEqual([]);
+    expect(
+      octokit.checkRuns.filter((run) => run.conclusion === 'skipped'),
+    ).toHaveLength(3);
+  });
+
+  it('waits for initial check creation before clearing a new stack', async () => {
+    const octokit = mockOctokit();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered = () => {};
+    const openingEntered = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let nextId = 100;
+    vi.mocked(octokit.rest.checks.create).mockImplementation(async (params) => {
+      const id = nextId++;
+      octokit.checkRuns.push({ op: 'create', id, ...params });
+      if (params.name === 'pstack/web') {
+        entered();
+        await gate;
+      }
+      return { data: { id } };
+    });
+    const { app, pstack } = await buildApp({ octokit });
+
+    const firstEvent = postPstack(app, {
+      id: 'evt_cleanup_opening',
+      event: 'job.started',
+      at: Date.now(),
+      data: { stack: 'pr-16828', action: 'up' },
+    });
+    await openingEntered;
+    const cleanup = app.fetch(
+      new Request('http://local/webhooks/pstack/checks/clear', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer checks-secret',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ stack: 'pr-16828' }),
+      }),
+    );
+    await drain();
+    vi.mocked(octokit.rest.checks.listForRef).mockResolvedValue({
+      data: {
+        check_runs: [
+          { id: 100, name: 'pstack/stack' },
+          { id: 101, name: 'pstack/db-seed' },
+          { id: 102, name: 'pstack/web' },
+        ],
+      },
+    });
+    release();
+
+    expect((await firstEvent).status).toBe(200);
+    expect((await cleanup).status).toBe(200);
+    await drain();
+    expect(pstack.active).toEqual([]);
+    expect(
+      octokit.checkRuns.filter((run) => run.conclusion === 'skipped'),
+    ).toHaveLength(3);
+    expect(octokit.checkRuns.at(-1)).toMatchObject({ conclusion: 'skipped' });
+  });
+
+  it('protects and validates the pstack checks cleanup webhook', async () => {
+    const { app } = await buildApp();
+    const request = (authorization?: string, body = '{}') =>
+      app.fetch(
+        new Request('http://local/webhooks/pstack/checks/clear', {
+          method: 'POST',
+          headers: {
+            ...(authorization ? { authorization } : {}),
+            'content-type': 'application/json',
+          },
+          body,
+        }),
+      );
+
+    expect((await request()).status).toBe(401);
+    expect((await request('Bearer checks-secret')).status).toBe(400);
+    expect(
+      (
+        await request(
+          'Bearer checks-secret',
+          JSON.stringify({ stack: 'staging' }),
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await request(
+          'Bearer checks-secret',
+          JSON.stringify({ stack: 'web-pr-1' }),
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await request(
+          'Bearer checks-secret',
+          JSON.stringify({ all: true, stack: 'pr-1' }),
+        )
+      ).status,
+    ).toBe(400);
+
+    const queryToken = await app.fetch(
+      new Request(
+        'http://local/webhooks/pstack/checks/clear?token=checks-secret',
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ all: true }),
+        },
+      ),
+    );
+    expect(queryToken.status).toBe(401);
+  });
+
   it('serves /health and /previews', async () => {
     const { app } = await buildApp();
     expect((await app.fetch(new Request('http://local/health'))).status).toBe(
@@ -533,6 +845,7 @@ describe('event-automation app (platform routes)', () => {
       expect.arrayContaining([
         'POST /webhooks/github',
         'POST /webhooks/preview-stacks',
+        'POST /webhooks/pstack/checks/clear',
         'GET /health',
         'GET /previews',
         'GET /events',

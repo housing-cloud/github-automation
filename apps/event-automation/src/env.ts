@@ -13,6 +13,7 @@ export const envSchema = z.object({
   GITHUB_ALLOWED_REPOS: z.string().min(1),
   GITHUB_WEBHOOK_SECRET: z.string().min(1),
   PSTACK_WEBHOOK_SECRET: z.string().min(1),
+  PSTACK_CHECKS_WEBHOOK_SECRET: z.string().min(1),
   PSTACK_REPO: z.string().min(1),
   PSTACK_SERVICES: z.string().optional(),
   PSTACK_BASE_URL: z.url().optional(),
@@ -32,6 +33,8 @@ export interface AppEnv {
   githubWebhookSecret: string;
   /** HMAC secret from the pstack `webhook`-type notifier. */
   pstackWebhookSecret: string;
+  /** Bearer secret protecting the operator-only pstack checks cleanup webhook. */
+  pstackChecksWebhookSecret: string;
   /**
    * The repo pstack stacks belong to. pstack payloads name a stack (`pr-16828`)
    * and never a repository, so this is the only way an event gets one.
@@ -88,6 +91,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     githubAllowedRepos,
     githubWebhookSecret: parsed.GITHUB_WEBHOOK_SECRET,
     pstackWebhookSecret: parsed.PSTACK_WEBHOOK_SECRET,
+    pstackChecksWebhookSecret: parsed.PSTACK_CHECKS_WEBHOOK_SECRET,
     pstackRepo,
     pstackServices: parsePstackServices(parsed.PSTACK_SERVICES),
     pstackBaseUrl: parsed.PSTACK_BASE_URL?.replace(/\/$/, ''),

@@ -181,6 +181,7 @@ function mockOctokit(headSha = 'abc1234def') {
       repos: { createDispatchEvent: vi.fn(async () => ({})) },
       pulls: {
         get: vi.fn(async () => ({ data: { head: { sha: headSha } } })),
+        list: vi.fn(async () => ({ data: [] })),
       },
       issues: {
         listLabelsOnIssue: vi.fn(async () => ({ data: [] })),

@@ -9,9 +9,10 @@ import { eventLogRoutes } from '@samyx/github-automation-suite/plugins/event-log
 import { previewStacksPlugin } from '@samyx/gha-plugin-preview-stacks';
 import { Hono, type MiddlewareHandler } from 'hono';
 import type { AppEnv } from './env';
-import type { AppOctokit } from './github/checks';
+import { type AppOctokit, clearPstackChecks } from './github/checks';
 import { createOctokit } from './github/octokit';
 import { PstackReporter } from './pstack/reporter';
+import { parseStackIdentity } from './pstack/stack';
 import { createRules } from './rules';
 
 export interface CreateEventAutomationAppOptions {
@@ -108,11 +109,54 @@ export async function createEventAutomation(
     c.json({ count: pstack.active.length, stacks: pstack.active }),
   );
 
+  const checkCleanup = new Hono();
+  checkCleanup.use('*', bearerGuard(env.pstackChecksWebhookSecret));
+  checkCleanup.post('/', async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'body must be valid JSON' }, 400);
+    }
+    const target = parseClearTarget(body);
+    if (!target) {
+      return c.json(
+        { error: 'body must be {"stack":"pr-123"} or {"all":true}' },
+        400,
+      );
+    }
+
+    try {
+      const specific = 'prNumber' in target;
+      const repo = { owner: env.githubOrg, name: env.pstackRepo };
+      const cleared = specific
+        ? await pstack.clearStack(target.stack, (headSha) =>
+            clearPstackChecks(octokit, repo, {
+              prNumber: target.prNumber,
+              headSha,
+            }),
+          )
+        : await pstack.clearAll(() => clearPstackChecks(octokit, repo, target));
+      return c.json({
+        ...cleared.result,
+        ...(specific ? { stack: target.stack } : {}),
+        forgotten: cleared.forgotten,
+      });
+    } catch (error) {
+      logger.error(
+        { target, error: String(error) },
+        'pstack: clearing GitHub checks failed',
+      );
+      return c.json({ error: 'clearing GitHub checks failed' }, 502);
+    }
+  });
+  app.route('/webhooks/pstack/checks/clear', checkCleanup);
+
   // `/events` — HTML table of received webhooks; `/events/json` — the same as
   // JSON. Mounted through a wrapper so the optional token guard (registered
   // before the routes) applies to the whole subtree.
   const events = new Hono();
-  if (env.eventLogToken) events.use('*', bearerGuard(env.eventLogToken));
+  if (env.eventLogToken) events.use('*', bearerGuard(env.eventLogToken, true));
   events.route(
     '/',
     eventLogRoutes(eventLog.store, {
@@ -124,7 +168,8 @@ export async function createEventAutomation(
   // `/dashboard` — bundled Vue dashboard (flow of rules -> handlers, event log,
   // handler log, config). Same optional token guard as `/events`.
   const dashboard = new Hono();
-  if (env.eventLogToken) dashboard.use('*', bearerGuard(env.eventLogToken));
+  if (env.eventLogToken)
+    dashboard.use('*', bearerGuard(env.eventLogToken, true));
   dashboard.route(
     '/',
     dashboardRoutes(engine, {
@@ -156,6 +201,8 @@ export async function createEventAutomation(
       'POST /webhooks/github': 'GitHub App webhook ingress',
       'POST /webhooks/preview-stacks':
         'pstack (preview-stacks) signed webhook ingress',
+      'POST /webhooks/pstack/checks/clear':
+        'Clear pstack checks for one stack or every open PR',
       'GET /events': 'Received-webhooks log (HTML table)',
       'GET /events/json': 'Received-webhooks log (JSON)',
       'GET /dashboard':
@@ -171,11 +218,26 @@ export async function createEventAutomation(
  * `Authorization: Bearer <token>` or a `?token=<token>` query param (so the log
  * page opens in a browser). Returns 401 otherwise.
  */
-function bearerGuard(token: string): MiddlewareHandler {
+function bearerGuard(token: string, allowQuery = false): MiddlewareHandler {
   const expected = `Bearer ${token}`;
   return async (c, next) => {
     if (c.req.header('authorization') === expected) return next();
-    if (c.req.query('token') === token) return next();
+    if (allowQuery && c.req.query('token') === token) return next();
     return c.json({ error: 'unauthorized' }, 401);
   };
+}
+
+function parseClearTarget(
+  body: unknown,
+): { stack: string; prNumber: number } | { all: true } | undefined {
+  if (!body || typeof body !== 'object' || Array.isArray(body))
+    return undefined;
+  const value = body as Record<string, unknown>;
+  const hasStack = 'stack' in value;
+  const stack = typeof value.stack === 'string' ? value.stack.trim() : '';
+  const identity = parseStackIdentity(stack);
+  const isAll = value.all === true;
+  if (hasStack === isAll || (hasStack && identity?.prefix !== ''))
+    return undefined;
+  return identity ? { stack, prNumber: identity.prNumber } : { all: true };
 }

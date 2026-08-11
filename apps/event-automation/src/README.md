@@ -72,6 +72,13 @@ long-running instance does not accumulate one entry per PR it ever saw.
 - `POST /webhooks/github` — GitHub App webhook ingress.
 - `POST /webhooks/preview-stacks` — pstack ingress, HMAC-verified with a replay
   window (`PSTACK_TOLERANCE_MS`, default 5 minutes).
+- `POST /webhooks/pstack/checks/clear` — operator-only cleanup webhook. Authenticate
+  with `Authorization: Bearer $PSTACK_CHECKS_WEBHOOK_SECRET`; send
+  `{"stack":"pr-16828"}` for one stack or `{"all":true}` for every open PR. GitHub has
+  no delete-check-suite API, so clearing completes every `pstack/*` run as
+  `skipped` and drops matching in-memory reporter state. Specific cleanup accepts
+  only the canonical `pr-<number>` name because a GitHub check suite is scoped to
+  the App and commit, not to a prefixed pstack deployment.
 - `GET /health` — liveness probe.
 - `GET /previews` — the preview stacks currently mirrored onto checks.
 - `GET /events` (HTML table of received webhooks) and `GET /events/json`. The
@@ -91,6 +98,9 @@ envelope — `slack`/`discord` notifiers send unsigned prose and are rejected.
 
 GitHub deliveries are verified as `x-hub-signature-256`, and events are further
 restricted to `GITHUB_ALLOWED_REPOS`.
+
+The checks cleanup webhook accepts its dedicated bearer secret in the
+`Authorization` header only. It never accepts the secret in the URL.
 
 ## Configuration
 

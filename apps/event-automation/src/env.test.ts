@@ -10,6 +10,7 @@ function raw(overrides: Record<string, string | undefined> = {}) {
     GITHUB_ALLOWED_REPOS: 'web, api',
     GITHUB_WEBHOOK_SECRET: 'gh-secret',
     PSTACK_WEBHOOK_SECRET: 'whsec_pstack',
+    PSTACK_CHECKS_WEBHOOK_SECRET: 'checks-secret',
     PSTACK_REPO: 'web',
     ...overrides,
   } as NodeJS.ProcessEnv;
@@ -22,6 +23,7 @@ describe('loadEnv', () => {
     expect([...env.githubAllowedRepos]).toEqual(['web', 'api']);
     expect(env.githubAppInstallationId).toBe(42);
     expect(env.pstackRepo).toBe('web');
+    expect(env.pstackChecksWebhookSecret).toBe('checks-secret');
     expect(env.port).toBe(8080);
   });
 
@@ -46,6 +48,12 @@ describe('loadEnv', () => {
 
   it('requires the pstack webhook secret', () => {
     expect(() => loadEnv(raw({ PSTACK_WEBHOOK_SECRET: undefined }))).toThrow();
+  });
+
+  it('requires the pstack checks cleanup webhook secret', () => {
+    expect(() =>
+      loadEnv(raw({ PSTACK_CHECKS_WEBHOOK_SECRET: undefined })),
+    ).toThrow();
   });
 
   it('rejects a pstack repo that is not allowed', () => {

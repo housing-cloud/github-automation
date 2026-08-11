@@ -38,8 +38,17 @@ ENV CI="true"
 ENV BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
 WORKDIR /app
 COPY --from=deps /app ./
+COPY apps/event-automation/scripts/docker-entrypoint.sh /usr/local/bin/event-automation-entrypoint
 WORKDIR /app/apps/event-automation
-USER bun
+# Dokploy must mount a persistent volume at /data to retain flow-run history
+# when the container is replaced. The entrypoint fixes ownership after the
+# mount is attached, then drops privileges to the bun user.
+RUN apt-get update -qq \
+    && apt-get install -qq --no-install-recommends gosu \
+    && rm -rf /var/lib/apt/lists/* \
+    && chmod +x /usr/local/bin/event-automation-entrypoint
+ENV FLOW_RUN_DB_PATH=/data/flow-runs.sqlite
 EXPOSE 8080
 # Configuration is entirely via environment variables — see REQUIREMENTS.md.
+ENTRYPOINT ["/usr/local/bin/event-automation-entrypoint"]
 CMD ["bun", "run", "src/index.ts"]

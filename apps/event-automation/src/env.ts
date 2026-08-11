@@ -21,6 +21,8 @@ export const envSchema = z.object({
   PSTACK_TOLERANCE_MS: z.string().optional(),
   EVENT_LOG_LIMIT: z.string().optional(),
   EVENT_LOG_TOKEN: z.string().optional(),
+  FLOW_RUN_DB_PATH: z.string().min(1).optional(),
+  FLOW_RUN_LIMIT: z.string().optional(),
   PORT: z.string().optional(),
 });
 
@@ -55,6 +57,10 @@ export interface AppEnv {
    * log is publicly reachable.
    */
   eventLogToken?: string;
+  /** SQLite file used for durable dashboard flow-run history. */
+  flowRunDbPath: string;
+  /** Maximum flow runs retained in SQLite. Defaults to 200. */
+  flowRunLimit: number;
   port: number;
 }
 
@@ -106,17 +112,30 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
           ),
     eventLogLimit: parseEventLogLimit(parsed.EVENT_LOG_LIMIT),
     eventLogToken: parsed.EVENT_LOG_TOKEN,
+    flowRunDbPath: parsed.FLOW_RUN_DB_PATH ?? './data/flow-runs.sqlite',
+    flowRunLimit: parsePositiveInteger(
+      parsed.FLOW_RUN_LIMIT,
+      200,
+      'FLOW_RUN_LIMIT',
+    ),
     port: parsePort(parsed.PORT),
   };
 }
 
 function parseEventLogLimit(value: string | undefined): number {
-  if (!value) return 500;
-  const limit = Number(value);
-  if (!Number.isInteger(limit) || limit < 1) {
-    throw new Error('EVENT_LOG_LIMIT must be a positive integer');
-  }
-  return limit;
+  return parsePositiveInteger(value, 500, 'EVENT_LOG_LIMIT');
+}
+
+function parsePositiveInteger(
+  value: string | undefined,
+  fallback: number,
+  name: string,
+): number {
+  if (!value) return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1)
+    throw new Error(`${name} must be a positive integer`);
+  return parsed;
 }
 
 function parseDuration(

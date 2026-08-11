@@ -8,7 +8,7 @@
     "dev": "ENVIRONMENT=local LOG_LEVEL=${LOG_LEVEL:-debug} bun --watch src/index.ts",
     "start": "bun run src/index.ts",
     "typecheck": "tsgo --noEmit",
-    "test": "vitest run",
+    "test": "bun test ./src/flow-runs/sqlite.bun.ts && vitest run",
     "test:watch": "vitest",
     "check": "biome check .",
     "check:error": "biome check . --diagnostic-level=error",
@@ -21,10 +21,12 @@
     "@samyx/github-automation-suite": "0.0.0-pre.23-rx",
     "hono": "^4.12.26",
     "octokit": "^4.1.4",
+    "rxjs": "^7.8.2",
     "zod": "catalog:"
   },
   "devDependencies": {
     "@hou/typescript": "workspace:*",
+    "@types/bun": "^1.3.12",
     "@types/node": "^22.13.14",
     "vitest": "catalog:"
   }

@@ -139,6 +139,8 @@ Two behaviours worth knowing, both taken from pstack's own semantics:
 | `PSTACK_TOLERANCE_MS` | `300000` (5m) | Replay window for pstack deliveries. Must be ≥ 1000. |
 | `EVENT_LOG_LIMIT` | `500` | Rows retained by the in-memory webhook log. |
 | `EVENT_LOG_TOKEN` | — | Bearer token gating `/events` and `/dashboard`. **Set this** if the service is publicly reachable. |
+| `FLOW_RUN_DB_PATH` | `./data/flow-runs.sqlite` (`/data/flow-runs.sqlite` in the container) | SQLite file for dashboard flow-run history. |
+| `FLOW_RUN_LIMIT` | `200` | Maximum flow runs retained in SQLite. |
 | `PORT` | `8080` | Listen port. |
 
 ---
@@ -150,6 +152,12 @@ Two behaviours worth knowing, both taken from pstack's own semantics:
 - [ ] App webhook subscribed to **Pull requests**, pointed at `/webhooks/github`,
       with `GITHUB_WEBHOOK_SECRET` set on both sides.
 - [ ] `EVENT_LOG_TOKEN` set if the service is internet-facing.
+- [ ] Dokploy persistent volume mounted at `/data` so flow-run history survives
+      container replacement. The container entrypoint fixes its ownership before
+      dropping to the `bun` user.
+- [ ] Service scaled to one steady-state replica; the pstack reporter and RxJS
+      coordinator are process-local. SQLite leases prevent active history rows
+      from being expired during a short rolling-deployment overlap.
 - [ ] pstack notifier created (**type `webhook`**), pointed at
       `/webhooks/preview-stacks`, subscribed to the events above, with its
       `whsec_…` secret → `PSTACK_WEBHOOK_SECRET`.
@@ -171,3 +179,5 @@ Two behaviours worth knowing, both taken from pstack's own semantics:
 6. Close the PR → `GET /previews` drops it (the state is released).
 7. pstack → the notifier's **Test** button is deliberately a no-op here: test
    deliveries reuse the `job.succeeded` event name and are excluded.
+8. `GET /dashboard/api/flow-runs` → `enabled: true`; after composed flows run,
+   their history remains visible after restarting the container.

@@ -24,6 +24,8 @@ describe('loadEnv', () => {
     expect(env.githubAppInstallationId).toBe(42);
     expect(env.pstackRepo).toBe('web');
     expect(env.pstackChecksWebhookSecret).toBe('checks-secret');
+    expect(env.flowRunDbPath).toBe('./data/flow-runs.sqlite');
+    expect(env.flowRunLimit).toBe(200);
     expect(env.port).toBe(8080);
   });
 
@@ -97,6 +99,8 @@ describe('loadEnv', () => {
         PORT: '9090',
         EVENT_LOG_TOKEN: 'tok',
         EVENT_LOG_LIMIT: '25',
+        FLOW_RUN_DB_PATH: '/data/custom.sqlite',
+        FLOW_RUN_LIMIT: '75',
       }),
     );
     expect(env.pstackToleranceMs).toBe(120_000);
@@ -104,11 +108,19 @@ describe('loadEnv', () => {
     expect(env.port).toBe(9090);
     expect(env.eventLogToken).toBe('tok');
     expect(env.eventLogLimit).toBe(25);
+    expect(env.flowRunDbPath).toBe('/data/custom.sqlite');
+    expect(env.flowRunLimit).toBe(75);
   });
 
   it('rejects a non-positive event log limit', () => {
     expect(() => loadEnv(raw({ EVENT_LOG_LIMIT: '0' }))).toThrow(
       /EVENT_LOG_LIMIT/,
+    );
+  });
+
+  it('rejects a non-positive flow run limit', () => {
+    expect(() => loadEnv(raw({ FLOW_RUN_LIMIT: '0' }))).toThrow(
+      /FLOW_RUN_LIMIT/,
     );
   });
 

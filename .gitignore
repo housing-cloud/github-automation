@@ -15,6 +15,7 @@ coverage/
 
 # local tooling state
 .lefthook-local/
+apps/event-automation/data/
 
 # env / secrets
 .env

@@ -1,12 +1,12 @@
 /**
  * Manual end-to-end boot check (not part of the vitest suite).
  *
- * Boots the real `createEventAutomationApp` on a real Bun HTTP server with a
+ * Boots the real `createEventAutomation` on a real Bun HTTP server with a
  * fake GitHub client, then drives it over real HTTP to confirm the whole path
  * works: signed pstack webhook -> rule -> reporter -> check runs + PR comment.
  */
 import { createHmac } from 'node:crypto';
-import { createEventAutomationApp } from '../src/app';
+import { createEventAutomation } from '../src/app';
 import { loadEnv } from '../src/env';
 
 const parsed = loadEnv({
@@ -21,6 +21,7 @@ const parsed = loadEnv({
   PSTACK_REPO: 'repo-a',
   PSTACK_BASE_URL: 'https://pstack.test',
   PSTACK_PREVIEW_DOMAIN: 'preview.hou.test',
+  FLOW_RUN_DB_PATH: ':memory:',
   PORT: '8099',
 } as NodeJS.ProcessEnv);
 
@@ -73,10 +74,11 @@ const octokit = {
   },
 };
 
-const app = await createEventAutomationApp({
+const automation = await createEventAutomation({
   env: parsed,
   octokit: octokit as any,
 });
+const { app } = automation;
 
 const server = Bun.serve({ port: 8099, fetch: app.fetch });
 console.log('server up on', server.port);
@@ -84,6 +86,10 @@ console.log('server up on', server.port);
 console.log(
   'GET /health ->',
   (await fetch('http://localhost:8099/health')).status,
+);
+console.log(
+  'GET /dashboard/api/flow-runs ->',
+  await (await fetch('http://localhost:8099/dashboard/api/flow-runs')).text(),
 );
 
 const doc: any = await (
@@ -246,4 +252,4 @@ console.log(
 );
 
 server.stop(true);
-process.exit(0);
+await automation.dispose();

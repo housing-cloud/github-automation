@@ -60,6 +60,8 @@ describe('.env.example', () => {
     expect([...env.pstackServices]).toEqual(['db-seed', 'web']);
     expect(env.pstackToleranceMs).toBeUndefined();
     expect(env.eventLogLimit).toBe(500);
+    expect(env.flowRunDbPath).toBe('./data/flow-runs.sqlite');
+    expect(env.flowRunLimit).toBe(200);
     expect(env.port).toBe(8080);
   });
 

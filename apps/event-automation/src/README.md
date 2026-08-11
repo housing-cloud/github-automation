@@ -8,10 +8,11 @@ supplies HOU's config, rules and the pstack reporter.
 
 ```
 src/
-├── index.ts                 # Bun entry: loadEnv -> createEventAutomationApp -> { port, fetch }
+├── index.ts                 # Bun entry: loadEnv -> createEventAutomation -> { port, fetch }
 ├── app.ts                   # wires the github + preview-stacks plugins + rules -> Hono
 ├── rules.ts                 # pstack events -> the reporter; PR closed -> release state
 ├── env.ts                   # Zod-validated environment -> AppEnv
+├── flow-runs/sqlite.ts      # persistent FlowRunStore for coordinator + dashboard
 ├── github/checks.ts         # check-run + PR-comment upserts (create-or-update)
 ├── github/octokit.ts        # the shared installation client
 ├── pstack/reporter.ts       # pstack events -> 3 check runs + a tracked PR comment
@@ -86,7 +87,29 @@ long-running instance does not accumulate one entry per PR it ever saw.
   `EVENT_LOG_TOKEN` to gate it behind `Authorization: Bearer <token>` or
   `?token=<token>` (unset = public).
 - `GET /dashboard` — Vue dashboard (`@samyx/gha-ui`): rules→handlers flow, event
-  log, handler log, and config. Same token guard as `/events`.
+  log, handler log, persisted flow runs, and config. Same token guard as `/events`.
+
+## Flow-run persistence
+
+The suite does not publish a SQLite adapter, so this app implements its
+`FlowRunStore` interface with Bun's built-in `bun:sqlite`. The same store is
+passed to `RxjsCoordinator` and the dashboard's `flowRuns` option. History is
+retained across restarts and bounded by `FLOW_RUN_LIMIT`. As in the suite's
+in-memory store, a key's display sequence resets after all of its retained runs
+have been evicted.
+
+The coordinator itself remains in-memory. A flow that was still active when its
+owning process stops cannot resume, so the SQLite adapter marks it `expired`
+during graceful shutdown. Process leases also expire abandoned rows after a
+crash without incorrectly expiring rows owned by an overlapping replacement.
+
+The production image writes `/data/flow-runs.sqlite`. Mount a persistent
+Dokploy volume at `/data`; the container entrypoint fixes the mounted directory's
+ownership before dropping to the `bun` user. Without that volume, history
+survives process restarts inside one container but not container replacement.
+Run one steady-state replica: pstack reporter state and the RxJS coordinator
+are process-local. The SQLite leases only prevent active history rows from being
+expired during a short rolling-deployment overlap.
 
 ## Security
 

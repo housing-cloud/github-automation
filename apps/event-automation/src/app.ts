@@ -1,6 +1,7 @@
 import { dashboardRoutes, type EventLogLike } from '@samyx/gha-ui';
-import type { Logger } from '@samyx/github-automation-suite';
+import type { FlowRunStore, Logger } from '@samyx/github-automation-suite';
 import { createEngine, noopLogger } from '@samyx/github-automation-suite';
+import { RxjsCoordinator } from '@samyx/github-automation-suite/coordinator/rxjs';
 import { mountDiscovery } from '@samyx/github-automation-suite/discovery';
 import { toHono } from '@samyx/github-automation-suite/hono';
 import { githubPlugin } from '@samyx/github-automation-suite/plugins/github';
@@ -15,7 +16,7 @@ import { PstackReporter } from './pstack/reporter';
 import { parseStackIdentity } from './pstack/stack';
 import { createRules } from './rules';
 
-export interface CreateEventAutomationAppOptions {
+export interface CreateEventAutomationOptions {
   env: AppEnv;
   logger?: Logger;
   /**
@@ -28,28 +29,20 @@ export interface CreateEventAutomationAppOptions {
   fetch?: typeof fetch;
   /** Override the pstack reporter (tests inject a recording Octokit). */
   pstack?: PstackReporter;
+  /** Override persistent flow-run history (tests may inject an in-memory store). */
+  flowRuns?: FlowRunStore;
 }
 
 export interface EventAutomationApp {
   app: Hono;
   pstack: PstackReporter;
+  flowRuns: FlowRunStore;
+  dispose(): Promise<void>;
 }
 
-/**
- * Build the event-automation Hono app on top of
- * `@samyx/github-automation-suite`: the GitHub + preview-stacks source plugins
- * plus the HOU rules, exposed as `POST /webhooks/{github,preview-stacks}` and
- * `GET /health`.
- */
-export async function createEventAutomationApp(
-  options: CreateEventAutomationAppOptions,
-): Promise<Hono> {
-  return (await createEventAutomation(options)).app;
-}
-
-/** Same as {@link createEventAutomationApp}, also returning the reporter. */
+/** Build the Hono app and its owned runtime resources. Call `dispose` on exit. */
 export async function createEventAutomation(
-  options: CreateEventAutomationAppOptions,
+  options: CreateEventAutomationOptions,
 ): Promise<EventAutomationApp> {
   const { env } = options;
   const logger = options.logger ?? noopLogger;
@@ -66,6 +59,13 @@ export async function createEventAutomation(
 
   // Records every received webhook into an in-memory LRU, served at `/events`.
   const eventLog = eventLogPlugin({ limit: env.eventLogLimit });
+  const flowRuns =
+    options.flowRuns ??
+    new (await import('./flow-runs/sqlite')).SqliteFlowRunStore({
+      path: env.flowRunDbPath,
+      limit: env.flowRunLimit,
+    });
+  const coordinator = new RxjsCoordinator({ logger, runs: flowRuns });
 
   // pstack reports on one repo's preview stacks: its payloads name a stack
   // (`pr-16828`) and never a repository, so the repo comes from config.
@@ -83,6 +83,7 @@ export async function createEventAutomation(
   const engine = await createEngine({
     logger: options.logger,
     fetch: options.fetch,
+    coordinator,
     plugins: [
       eventLog,
       githubPlugin({
@@ -177,6 +178,7 @@ export async function createEventAutomation(
       // The store's records are structurally what the dashboard reads; the cast
       // bridges the separately-declared EventLogLike (index-signature) type.
       eventLog: eventLog.store as unknown as EventLogLike,
+      flowRuns,
       config: {
         org: env.githubOrg,
         allowedRepos: [...env.githubAllowedRepos],
@@ -185,6 +187,7 @@ export async function createEventAutomation(
         pstackBaseUrl: env.pstackBaseUrl,
         previewDomain: env.pstackPreviewDomain,
         eventLogLimit: env.eventLogLimit,
+        flowRunLimit: env.flowRunLimit,
       },
     }),
   );
@@ -210,7 +213,19 @@ export async function createEventAutomation(
     },
   });
 
-  return { app, pstack };
+  return {
+    app,
+    pstack,
+    flowRuns,
+    async dispose() {
+      try {
+        await engine.dispose();
+      } finally {
+        if ('close' in flowRuns && typeof flowRuns.close === 'function')
+          flowRuns.close();
+      }
+    },
+  };
 }
 
 /**

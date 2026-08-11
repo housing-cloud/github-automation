@@ -1,5 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { noopLogger } from '@samyx/github-automation-suite';
+import { MemoryFlowRunStore, noopLogger } from '@samyx/github-automation-suite';
 import { describe, expect, it, vi } from 'vitest';
 import { createEventAutomation } from './app';
 import type { AppEnv } from './env';
@@ -23,6 +23,8 @@ function env(overrides: Partial<AppEnv> = {}): AppEnv {
     pstackBaseUrl: 'https://pstack.test',
     pstackPreviewDomain: 'preview.hou.test',
     eventLogLimit: 500,
+    flowRunDbPath: ':memory:',
+    flowRunLimit: 200,
     port: 8080,
     ...overrides,
   };
@@ -141,6 +143,7 @@ async function buildApp(
     octokit,
     logger: noopLogger,
     fetch: overrides.fetch,
+    flowRuns: new MemoryFlowRunStore(),
   });
   return { ...built, octokit };
 }
@@ -785,6 +788,30 @@ describe('event-automation app (platform routes)', () => {
     const previews = await app.fetch(new Request('http://local/previews'));
     expect(previews.status).toBe(200);
     expect(await previews.json()).toMatchObject({ count: 0, stacks: [] });
+  });
+
+  it('enables the dashboard flow-runs API with the configured store', async () => {
+    const { app, flowRuns, dispose } = await buildApp();
+    flowRuns.start({
+      id: 'preview-flow::pr-1@1',
+      key: 'preview-flow::pr-1',
+      rule: 'preview-flow',
+      entity: 'pr-1',
+      blocks: 2,
+      at: 10,
+    });
+
+    const response = await app.fetch(
+      new Request('http://local/dashboard/api/flow-runs'),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      enabled: true,
+      count: 1,
+      limit: 200,
+      runs: [{ entity: 'pr-1', status: 'active' }],
+    });
+    await dispose();
   });
 
   it('reports the stacks it is tracking at /previews', async () => {

@@ -17,8 +17,11 @@ export const envSchema = z.object({
   PSTACK_REPO: z.string().min(1),
   PSTACK_SERVICES: z.string().optional(),
   PSTACK_BASE_URL: z.url().optional(),
+  PSTACK_API_URL: z.url().optional(),
+  PSTACK_API_TOKEN: z.string().optional(),
   PSTACK_PREVIEW_DOMAIN: z.string().optional(),
   PSTACK_TOLERANCE_MS: z.string().optional(),
+  PSTACK_COMMAND_TIMEOUT_MS: z.string().optional(),
   EVENT_LOG_LIMIT: z.string().optional(),
   EVENT_LOG_TOKEN: z.string().optional(),
   FLOW_RUN_DB_PATH: z.string().min(1).optional(),
@@ -46,10 +49,20 @@ export interface AppEnv {
   pstackServices: readonly string[];
   /** pstack dashboard URL, linked from the checks and comment. */
   pstackBaseUrl?: string;
+  /**
+   * pstack control-plane API base URL (`https://api.<domain>`). Enables the
+   * live preview URLs and the `@cloudybot` commands; without it this service
+   * only reports what pstack pushes.
+   */
+  pstackApiUrl?: string;
+  /** `PSTACK_TOKEN` or a `pstack_pat_…`. Required for the write commands. */
+  pstackApiToken?: string;
   /** Preview domain, used to build `<service>-<stack>.<domain>` URLs. */
   pstackPreviewDomain?: string;
   /** Replay window for pstack deliveries. Defaults to the plugin's 5 minutes. */
   pstackToleranceMs?: number;
+  /** How long a `@cloudybot` command waits for readiness. Defaults to 10m. */
+  pstackCommandTimeoutMs: number;
   /** Max rows retained by the in-memory event log (LRU). Defaults to 500. */
   eventLogLimit: number;
   /**
@@ -89,6 +102,12 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     );
   }
 
+  // A token with nowhere to send it means the operator expected the commands to
+  // work and they silently would not — the API URL is what switches them on.
+  if (parsed.PSTACK_API_TOKEN && !parsed.PSTACK_API_URL) {
+    throw new Error('PSTACK_API_TOKEN is set but PSTACK_API_URL is not');
+  }
+
   return {
     githubAppId: parsed.GITHUB_APP_ID,
     githubAppPrivateKey: parsed.GITHUB_APP_PRIVATE_KEY.replaceAll('\\n', '\n'),
@@ -101,6 +120,8 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     pstackRepo,
     pstackServices: parsePstackServices(parsed.PSTACK_SERVICES),
     pstackBaseUrl: parsed.PSTACK_BASE_URL?.replace(/\/$/, ''),
+    pstackApiUrl: parsed.PSTACK_API_URL?.replace(/\/$/, ''),
+    pstackApiToken: parsed.PSTACK_API_TOKEN,
     pstackPreviewDomain: parsed.PSTACK_PREVIEW_DOMAIN,
     pstackToleranceMs:
       parsed.PSTACK_TOLERANCE_MS === undefined
@@ -110,6 +131,11 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
             5 * 60_000,
             'PSTACK_TOLERANCE_MS',
           ),
+    pstackCommandTimeoutMs: parseDuration(
+      parsed.PSTACK_COMMAND_TIMEOUT_MS,
+      10 * 60_000,
+      'PSTACK_COMMAND_TIMEOUT_MS',
+    ),
     eventLogLimit: parseEventLogLimit(parsed.EVENT_LOG_LIMIT),
     eventLogToken: parsed.EVENT_LOG_TOKEN,
     flowRunDbPath: parsed.FLOW_RUN_DB_PATH ?? './data/flow-runs.sqlite',

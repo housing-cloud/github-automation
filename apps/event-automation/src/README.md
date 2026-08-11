@@ -1,28 +1,33 @@
 # event-automation
 
 A Bun + Hono webhook service that mirrors **preview-stacks (pstack)** preview
-deployments onto GitHub pull requests. The engine — webhook intake, signature
-verification, normalization, authorization, matcher/handler dispatch — lives in
-the published, framework-agnostic **`@samyx/github-automation-suite`**; this app
-supplies HOU's config, rules and the pstack reporter.
+deployments onto GitHub pull requests, and lets reviewers drive them back with
+`@cloudybot` commands. The engine — webhook intake, signature verification,
+normalization, authorization, matcher/handler dispatch — lives in the published,
+framework-agnostic **`@samyx/github-automation-suite`**; this app supplies HOU's
+config, rules and the pstack reporter.
 
 ```
 src/
 ├── index.ts                 # Bun entry: loadEnv -> createEventAutomation -> { port, fetch }
 ├── app.ts                   # wires the github + preview-stacks plugins + rules -> Hono
-├── rules.ts                 # pstack events -> the reporter; PR closed -> release state
+├── rules.ts                 # pstack events -> the reporter; @cloudybot -> commands
 ├── env.ts                   # Zod-validated environment -> AppEnv
 ├── flow-runs/sqlite.ts      # persistent FlowRunStore for coordinator + dashboard
 ├── github/checks.ts         # check-run + PR-comment upserts (create-or-update)
 ├── github/octokit.ts        # the shared installation client
 ├── pstack/reporter.ts       # pstack events -> 3 check runs + a tracked PR comment
+├── pstack/client.ts         # @samyx/preview-stacks-client: live URLs, readiness, verify
+├── pstack/commands.ts       # @cloudybot recheck / restart / redeploy
+├── pstack/help.ts           # the one-time usage comment
+├── pstack/ingress.ts        # pstack webhook ingress, verified by the client
 └── pstack/stack.ts          # stack-name -> PR number, container-name -> service
 ```
 
 ## What it does
 
-For a preview stack named `pr-<number>`, the PR gets three check runs and one
-comment:
+For a preview stack named `pr-<number>`, the PR gets three check runs and two
+comments:
 
 | Check run | Passes when | Fails when |
 | --- | --- | --- |
@@ -34,6 +39,11 @@ The watched services come from `PSTACK_SERVICES` (default `db-seed,web`). Once
 the stack check settles, a single **"Preview stack" comment** carries the status,
 the container counts, the failing/pending container names and the per-service
 preview URLs. It is edited in place, never re-posted.
+
+Alongside it, a **"Preview stack bot" comment** is posted once when the checks
+first open — which is when a reviewer first sees three pending checks and wonders
+what they are — explaining the checks and the commands. It is never edited, so it
+stays a stable reference while the status comment churns.
 
 ## Three details that shape the implementation
 
@@ -65,6 +75,42 @@ The state is in-memory, which is the right shape here — the checks and the
 comment live on GitHub, which is the durable store, and a restart simply re-opens
 them on the next event. `pull_request.closed` releases a PR's state so a
 long-running instance does not accumulate one entry per PR it ever saw.
+
+## The control-plane API (optional)
+
+Setting `PSTACK_API_URL` gives the service a **pull** direction, through
+`@samyx/preview-stacks-client`. Without it everything above still works; the
+service is simply push-only and can ask pstack nothing.
+
+**Real preview URLs.** The comment's links come from the stack's live Traefik
+routing table rather than the `<service>-<stack>.<domain>` pattern. That pattern
+is only pstack's *default* router rule, so a spec with its own rule, port or
+domain would otherwise get an authoritative-looking 404. Routed services outside
+`PSTACK_SERVICES` are listed too. The table is read just before each comment is
+written, because routers appear as containers come up. `PSTACK_PREVIEW_DOMAIN`
+remains the fallback.
+
+**`@cloudybot` commands.** `recheck`, `restart` and `redeploy` — in escalating
+order of disruption — given as a PR comment or as a `cloudy-*` label. Four
+properties shape the implementation:
+
+1. **The work outlives the webhook.** A redeploy takes minutes and a delivery
+   gets seconds, so a command is accepted synchronously — the checks reopening
+   *is* the acknowledgement — and runs detached. `dispose()` drains them.
+2. **The verdict is expressed as pstack events.** A settled `Readiness` is
+   projected onto the same `container.*` + `stack.*` signals the webhooks carry,
+   so the reducer has one way to settle a check rather than two. That is what
+   lets `recheck` repair a check left pending by a missed delivery.
+3. **One command per stack at a time.** pstack rejects a second job on a busy
+   stack with a 409, and two waits racing over the same checks would fight.
+4. **Still converging is not a verdict.** When the wait expires with the stack
+   mid-flight the checks stay pending for pstack's own delivery to settle,
+   rather than reporting a false failure on a slow stack.
+
+The rules are registered only when the API is configured: a bot that
+acknowledges `@cloudybot redeploy` and cannot redeploy anything is worse than
+one that stays quiet. Bot-authored comments are ignored, so the help comment's
+own table cannot trigger it.
 
 ## Routes
 
@@ -118,6 +164,15 @@ Every pstack delivery carries
 over the raw bytes with the timestamp inside the signed material, so the replay
 window genuinely bounds replays. Only a **`webhook`-type** notifier sends that
 envelope — `slack`/`discord` notifiers send unsigned prose and are rejected.
+
+That check is the client's own `verifyWebhook`, wrapped in `pstack/ingress.ts`.
+The suite's plugin ships an equivalent HMAC check, but its `verify` returns a
+bare boolean, which discards two things the receiver half of the contract
+reports: **why** a delivery was rejected (a stale timestamp is a clock skew, not
+an attack) and **`x-pstack-redelivery`**, the header pstack sets when an operator
+replays a past delivery — legitimate traffic worth logging as such. The plugin's
+`parseEventType`/`normalize` are kept, so rules read the same event data as
+before.
 
 GitHub deliveries are verified as `x-hub-signature-256`, and events are further
 restricted to `GITHUB_ALLOWED_REPOS`.

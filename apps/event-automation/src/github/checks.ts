@@ -115,6 +115,17 @@ export interface AppOctokit {
         repo: string;
         issue_number: number;
       }) => Promise<{ data: Array<{ name: string }> }>;
+      /**
+       * Labels are sticky: `cloudy-redeploy` stays on the PR after it fires, so
+       * re-applying it produces no `labeled` event. Removing it is what makes
+       * the label a repeatable button rather than a one-shot.
+       */
+      removeLabel: (params: {
+        owner: string;
+        repo: string;
+        issue_number: number;
+        name: string;
+      }) => Promise<unknown>;
       createComment: (params: {
         owner: string;
         repo: string;
@@ -376,4 +387,37 @@ async function findComment(
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Post a marked comment **only if the PR does not already carry one**, and
+ * never edit it afterwards.
+ *
+ * This is the shape the help comment needs, and it differs from
+ * {@link upsertComment} in the case that matters: an existing help comment is
+ * left exactly as it is. Editing it on every deploy would push a PR
+ * notification for text that never changes, and the point of a separate
+ * comment is that it is written once and then stays out of the way.
+ *
+ * Returns the comment id when one was created, `undefined` when one already
+ * existed. The listing is best-effort — see {@link findComment} — so a failed
+ * lookup falls through to creating one, which is the harmless direction: the
+ * caller only asks once per PR per process.
+ */
+export async function ensureComment(
+  octokit: AppOctokit,
+  repo: RepoRef,
+  issueNumber: number,
+  marker: string,
+  body: string,
+): Promise<number | undefined> {
+  const existing = await findComment(octokit, repo, issueNumber, marker);
+  if (existing !== undefined) return undefined;
+  const created = await octokit.rest.issues.createComment({
+    owner: repo.owner,
+    repo: repo.name,
+    issue_number: issueNumber,
+    body: `${body}\n\n<!-- ${marker} -->`,
+  });
+  return created.data.id;
 }

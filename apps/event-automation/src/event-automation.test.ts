@@ -23,6 +23,7 @@ function env(overrides: Partial<AppEnv> = {}): AppEnv {
     pstackBaseUrl: 'https://pstack.test',
     pstackPreviewDomain: 'preview.hou.test',
     eventLogLimit: 500,
+    pstackCommandTimeoutMs: 10 * 60_000,
     flowRunDbPath: ':memory:',
     flowRunLimit: 200,
     port: 8080,
@@ -44,8 +45,9 @@ function mockOctokit(): AppOctokit & {
     rest: {
       checks: {
         create: vi.fn(async (params) => {
-          checkRuns.push({ op: 'create', ...params });
-          return { data: { id: nextId++ } };
+          const id = nextId++;
+          checkRuns.push({ op: 'create', id, ...params });
+          return { data: { id } };
         }),
         update: vi.fn(async (params) => {
           checkRuns.push({ op: 'update', ...params });
@@ -61,6 +63,7 @@ function mockOctokit(): AppOctokit & {
       },
       issues: {
         listLabelsOnIssue: vi.fn(async () => ({ data: [] })),
+        removeLabel: vi.fn(async () => ({})),
         createComment: vi.fn(async (params) => {
           comments.push({ op: 'create', ...params });
           return { data: { id: nextId++ } };
@@ -135,13 +138,14 @@ async function buildApp(
     envOverrides?: Partial<AppEnv>;
     octokit?: ReturnType<typeof mockOctokit>;
     fetch?: typeof fetch;
+    logger?: typeof noopLogger;
   } = {},
 ) {
   const octokit = overrides.octokit ?? mockOctokit();
   const built = await createEventAutomation({
     env: env(overrides.envOverrides),
     octokit,
-    logger: noopLogger,
+    logger: overrides.logger ?? noopLogger,
     fetch: overrides.fetch,
     flowRuns: new MemoryFlowRunStore(),
   });
@@ -153,6 +157,48 @@ async function drain(): Promise<void> {
   for (let i = 0; i < 20; i++) await Promise.resolve();
   await new Promise((resolve) => setTimeout(resolve, 5));
   for (let i = 0; i < 20; i++) await Promise.resolve();
+}
+
+interface LogLine {
+  level: string;
+  fields: Record<string, unknown>;
+  message: string;
+}
+
+/** A logger that keeps what was written, for asserting on operator-facing logs. */
+function recordingLogger(lines: LogLine[]): typeof noopLogger {
+  const record =
+    (level: string) =>
+    (value: unknown, message?: string): void => {
+      lines.push({
+        level,
+        fields:
+          typeof value === 'object' && value !== null
+            ? (value as Record<string, unknown>)
+            : {},
+        message: message ?? (typeof value === 'string' ? value : ''),
+      });
+    };
+  return {
+    trace: record('trace'),
+    debug: record('debug'),
+    info: record('info'),
+    warn: record('warn'),
+    error: record('error'),
+  };
+}
+
+/**
+ * Latest state written for a named check run. `create` carries the name and
+ * `update` only the id it returned, so the two have to be joined.
+ */
+function latestCheck(calls: Array<Record<string, unknown>>, name: string) {
+  const created = calls.find((c) => c.op === 'create' && c.name === name);
+  if (!created) return undefined;
+  const updates = calls.filter(
+    (c) => c.op === 'update' && c.check_run_id === created.id,
+  );
+  return (updates.at(-1) ?? created) as Record<string, unknown>;
 }
 
 /** Post a pstack envelope, signed exactly as pstack signs it. */
@@ -296,6 +342,83 @@ describe('event-automation app (pstack preview stacks)', () => {
     expect(res.status).toBe(401);
     await drain();
     expect(octokit.checkRuns).toHaveLength(0);
+  });
+
+  /**
+   * `x-pstack-redelivery: 1` is what pstack sets when an operator replays a
+   * delivery from the Notifiers page — the usual way a missed event gets
+   * re-sent. It must be accepted and acted on, not treated as a duplicate.
+   */
+  it('accepts a delivery an operator replayed', async () => {
+    const logs: LogLine[] = [];
+    const { app, octokit } = await buildApp({ logger: recordingLogger(logs) });
+    const at = Date.now();
+    const body = JSON.stringify({
+      id: 'evt_replay',
+      event: 'stack.ready',
+      at,
+      data: { stack: 'pr-16828', state: 'ready', containers: 1, ready: 1 },
+    });
+
+    const res = await app.fetch(
+      new Request('http://local/webhooks/preview-stacks', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-pstack-event': 'stack.ready',
+          'x-pstack-delivery': 'evt_replay',
+          'x-pstack-timestamp': String(at),
+          'x-pstack-redelivery': '1',
+          'x-pstack-signature': `sha256=${createHmac('sha256', 'pstack-secret')
+            .update(`${at}.${body}`)
+            .digest('hex')}`,
+        },
+        body,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    await drain();
+    expect(latestCheck(octokit.checkRuns, 'pstack/stack')?.conclusion).toBe(
+      'success',
+    );
+    // The replay is logged as such: at-least-once delivery makes it normal
+    // traffic, and an operator who pressed Replay needs to see it landed.
+    expect(
+      logs.some((l) => l.message.includes('replayed webhook delivery')),
+    ).toBe(true);
+  });
+
+  /**
+   * A rejection is logged with its cause. A stale timestamp is a clock skew and
+   * a bad signature is a wrong secret or an attack; an operator staring at a 401
+   * has nothing else to tell them apart.
+   */
+  it('reports why a delivery was rejected', async () => {
+    const logs: LogLine[] = [];
+    const { app } = await buildApp({ logger: recordingLogger(logs) });
+
+    await postPstack(
+      app,
+      {
+        id: 'evt_forged',
+        event: 'stack.ready',
+        at: Date.now(),
+        data: { stack: 'pr-16828', containers: 1, ready: 1 },
+      },
+      'wrong-secret',
+    );
+    await postPstack(app, {
+      id: 'evt_stale',
+      event: 'stack.ready',
+      at: Date.now() - 60 * 60_000,
+      data: { stack: 'pr-16828', containers: 1, ready: 1 },
+    });
+
+    const reasons = logs
+      .filter((l) => l.message.includes('rejected a webhook delivery'))
+      .map((l) => l.fields.reason);
+    expect(reasons).toEqual(['signature mismatch', 'stale timestamp']);
   });
 
   it('drives the whole sequence to a failed web check and a PR comment', async () => {
@@ -914,5 +1037,386 @@ describe('event-automation app (platform routes)', () => {
       }),
     );
     expect(res.status).toBe(404);
+  });
+});
+
+/**
+ * The `@cloudybot` commands, driven end to end: a signed GitHub webhook in at
+ * the HTTP edge, and the pstack calls plus check runs it produces out the other
+ * side. Everything between (rule matching, the command runner, the reporter) is
+ * the real code.
+ */
+describe('event-automation app (@cloudybot commands)', () => {
+  /** A pstack API that records what the app asks it for. */
+  function pstackApi(options: { containers?: string[] } = {}) {
+    const calls: Array<{ method: string; path: string }> = [];
+    const containers = options.containers ?? ['pr-16828-web-1'];
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        // Only the pstack API is faked; anything else is a bug in the test.
+        if (url.origin !== 'https://pstack-api.test') {
+          throw new Error(`unexpected fetch to ${url.origin}`);
+        }
+        calls.push({ method: init?.method ?? 'GET', path: url.pathname });
+
+        if (url.pathname === '/api/deployments') {
+          return json({
+            deployments: [
+              {
+                id: 'pr-16828',
+                stack: 'pr-16828',
+                kind: 'isolated',
+                busy: false,
+                running: true,
+              },
+            ],
+          });
+        }
+        if (url.pathname.endsWith('/up')) {
+          return json({
+            job: {
+              id: 'job-1',
+              stack: 'pr-16828',
+              action: 'up',
+              state: 'running',
+              startedAt: 0,
+            },
+          });
+        }
+        if (url.pathname.startsWith('/api/jobs/')) {
+          return json({
+            job: {
+              id: 'job-1',
+              stack: 'pr-16828',
+              action: 'up',
+              state: 'ok',
+              startedAt: 0,
+              endedAt: 1_000,
+            },
+          });
+        }
+        if (url.pathname.endsWith('/restart')) {
+          return json({ container: 'x', action: 'restart', note: 'ok' });
+        }
+        if (url.pathname.endsWith('/runtime')) {
+          return json({
+            stack: 'pr-16828',
+            reachable: true,
+            challenge: 'dns01',
+            findings: [],
+            containers: containers.map((name, i) => ({
+              id: `c${i}`,
+              name,
+              service: 'web',
+              image: 'img',
+              state: 'running',
+              health: 'healthy',
+              exitCode: null,
+              restartCount: 0,
+              networks: [],
+              ingressIp: null,
+              ports: [],
+              traefikLabels: {},
+            })),
+            routes: [
+              {
+                router: 'r-web',
+                container: containers[0] ?? 'pr-16828-web-1',
+                rule: 'Host(`shop-pr-16828.hou.test`)',
+                hosts: ['shop-pr-16828.hou.test'],
+                service: 'web',
+                port: 3000,
+                entrypoints: 'websecure',
+                tls: true,
+                certresolver: null,
+                priority: null,
+                target: null,
+              },
+            ],
+          });
+        }
+        if (url.pathname.endsWith('/readiness')) {
+          return json({
+            id: 'pr-16828',
+            stack: 'pr-16828',
+            state: 'ready',
+            startedAt: 0,
+            endedAt: 2_000,
+            reachable: true,
+            timeoutMs: 180_000,
+            containers: containers.map((name) => ({
+              name,
+              service: 'web',
+              state: 'running',
+              health: 'healthy',
+              hasHealthcheck: true,
+              exitCode: null,
+              restartCount: 0,
+              ready: true,
+              failed: false,
+            })),
+          });
+        }
+        throw new Error(`unexpected pstack call ${url.pathname}`);
+      },
+    );
+
+    return { fetchMock, calls };
+  }
+
+  const CommandEnv: Partial<AppEnv> = {
+    pstackApiUrl: 'https://pstack-api.test',
+    pstackApiToken: 'pstack_pat_test',
+  };
+
+  function commentBody(
+    body: string,
+    options: {
+      userType?: string;
+      isPr?: boolean;
+      action?: string;
+      repo?: string;
+    } = {},
+  ): string {
+    const repo = options.repo ?? 'repo-a';
+    return JSON.stringify({
+      action: options.action ?? 'created',
+      issue: {
+        number: 16828,
+        pull_request: options.isPr === false ? undefined : { url: 'x' },
+      },
+      comment: {
+        id: 1,
+        body,
+        user: { login: 'alice', type: options.userType ?? 'User' },
+      },
+      repository: {
+        name: repo,
+        full_name: `housing-cloud/${repo}`,
+        owner: { login: 'housing-cloud' },
+      },
+    });
+  }
+
+  function labeledBody(label: string): string {
+    return JSON.stringify({
+      action: 'labeled',
+      number: 16828,
+      label: { name: label },
+      sender: { login: 'alice' },
+      pull_request: {
+        number: 16828,
+        head: {
+          sha: 'abc1234567890',
+          ref: 'feature',
+          repo: {
+            full_name: 'housing-cloud/repo-a',
+            name: 'repo-a',
+            owner: { login: 'housing-cloud' },
+          },
+        },
+        base: { ref: 'main' },
+        labels: [{ name: label }],
+      },
+      repository: {
+        name: 'repo-a',
+        full_name: 'housing-cloud/repo-a',
+        owner: { login: 'housing-cloud' },
+      },
+    });
+  }
+
+  /** Await the app's detached command work, not just the microtask queue. */
+  async function settle(commands: { drain(): Promise<void> } | undefined) {
+    await drain();
+    await commands?.drain();
+    await drain();
+  }
+
+  it('redeploys the stack from a PR comment and settles the checks', async () => {
+    const { fetchMock, calls } = pstackApi();
+    const { app, octokit, commands } = await buildApp({
+      envOverrides: CommandEnv,
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    const res = await postGithub(
+      app,
+      commentBody('@cloudybot redeploy'),
+      'd-cmd-1',
+      'issue_comment',
+    );
+    expect(res.status).toBe(200);
+    await settle(commands);
+
+    expect(
+      calls.some((c) => c.method === 'POST' && c.path.endsWith('/up')),
+    ).toBe(true);
+    expect(latestCheck(octokit.checkRuns, 'pstack/stack')?.conclusion).toBe(
+      'success',
+    );
+  });
+
+  it('runs the command applied as a label and removes it', async () => {
+    const { fetchMock, calls } = pstackApi();
+    const { app, octokit, commands } = await buildApp({
+      envOverrides: CommandEnv,
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    const res = await postGithub(app, labeledBody('cloudy-restart'), 'd-cmd-2');
+    expect(res.status).toBe(200);
+    await settle(commands);
+
+    expect(calls.some((c) => c.path.endsWith('/restart'))).toBe(true);
+    expect(octokit.rest.issues.removeLabel).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'cloudy-restart', issue_number: 16828 }),
+    );
+  });
+
+  /**
+   * The bot's own help comment documents `@cloudybot redeploy` in a table. A
+   * service that acted on its own comments would redeploy every stack it ever
+   * documented, so this is the loop that must not close.
+   */
+  it('ignores a command in a bot’s own comment', async () => {
+    const { fetchMock, calls } = pstackApi();
+    const { app, commands } = await buildApp({
+      envOverrides: CommandEnv,
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await postGithub(
+      app,
+      commentBody('@cloudybot redeploy', { userType: 'Bot' }),
+      'd-cmd-3',
+      'issue_comment',
+    );
+    await settle(commands);
+
+    expect(calls).toHaveLength(0);
+  });
+
+  it('ignores a command on an issue, which has no preview stack', async () => {
+    const { fetchMock, calls } = pstackApi();
+    const { app, commands } = await buildApp({
+      envOverrides: CommandEnv,
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await postGithub(
+      app,
+      commentBody('@cloudybot redeploy', { isPr: false }),
+      'd-cmd-4',
+      'issue_comment',
+    );
+    await settle(commands);
+
+    expect(calls).toHaveLength(0);
+  });
+
+  it('ignores ordinary conversation', async () => {
+    const { fetchMock, calls } = pstackApi();
+    const { app, commands } = await buildApp({
+      envOverrides: CommandEnv,
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await postGithub(
+      app,
+      commentBody('should we redeploy this?'),
+      'd-cmd-5',
+      'issue_comment',
+    );
+    await settle(commands);
+
+    expect(calls).toHaveLength(0);
+  });
+
+  /**
+   * A command is a write against real infrastructure, so it must respect the
+   * same repo allow-list as everything else: a PR in a repo this service was
+   * not scoped to cannot drive a deploy through it.
+   */
+  it('ignores a command from a repo outside GITHUB_ALLOWED_REPOS', async () => {
+    const { fetchMock, calls } = pstackApi();
+    const { app, commands } = await buildApp({
+      envOverrides: CommandEnv,
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await postGithub(
+      app,
+      commentBody('@cloudybot redeploy', { repo: 'not-allowed' }),
+      'd-cmd-7',
+      'issue_comment',
+    );
+    await settle(commands);
+
+    expect(calls).toHaveLength(0);
+  });
+
+  /**
+   * Without the API configured the service cannot carry a command out, so the
+   * rule is not registered at all — acknowledging one it cannot run would be
+   * worse than ignoring it.
+   */
+  it('does not register the command rules without the API configured', async () => {
+    const { app, commands } = await buildApp();
+    expect(commands).toBeUndefined();
+
+    const res = await postGithub(
+      app,
+      commentBody('@cloudybot redeploy'),
+      'd-cmd-6',
+      'issue_comment',
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it('puts the live Traefik URL on the comment', async () => {
+    const { fetchMock } = pstackApi();
+    const { app, octokit } = await buildApp({
+      envOverrides: CommandEnv,
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await postPstack(app, {
+      id: 'evt_ready',
+      event: 'stack.ready',
+      at: Date.now(),
+      data: { stack: 'pr-16828', state: 'ready', containers: 1, ready: 1 },
+    });
+    await drain();
+
+    const body = String(octokit.comments.at(-1)?.body);
+    expect(body).toContain('https://shop-pr-16828.hou.test');
+    // The configured pattern would have produced this instead.
+    expect(body).not.toContain('web-pr-16828.preview.hou.test');
+  });
+
+  it('posts the help comment when the checks first open', async () => {
+    const { app, octokit } = await buildApp();
+
+    await postPstack(app, {
+      id: 'evt_start',
+      event: 'job.started',
+      at: Date.now(),
+      data: { stack: 'pr-16828', action: 'up' },
+    });
+    await drain();
+
+    const help = octokit.comments.filter((c) =>
+      String(c.body).includes('Preview stack bot'),
+    );
+    expect(help).toHaveLength(1);
+    expect(help[0]?.issue_number).toBe(16828);
   });
 });

@@ -9,7 +9,11 @@
 import { noopLogger } from '@samyx/github-automation-suite';
 import { describe, expect, it, vi } from 'vitest';
 import type { AppOctokit } from '../github/checks';
-import { PstackReporter, type PstackSignal } from './reporter';
+import {
+  PstackReporter,
+  HELP_COMMENT_MARKER,
+  type PstackSignal,
+} from './reporter';
 import {
   parseStackIdentity,
   previewUrlFor,
@@ -160,6 +164,16 @@ function signal(envelope: {
 function mockOctokit(headSha = 'abc1234def') {
   const checks: Array<Record<string, unknown>> = [];
   const comments: Array<Record<string, unknown>> = [];
+  // The status comment and the one-time help comment are different artefacts
+  // written through the same endpoint. Split at the mock so a test asserting
+  // "exactly one comment" cannot pass while two were posted.
+  const helpComments: Array<Record<string, unknown>> = [];
+  const record = (call: Record<string, unknown>) => {
+    const target = String(call.body ?? '').includes(HELP_COMMENT_MARKER)
+      ? helpComments
+      : comments;
+    target.push(call);
+  };
   let nextId = 500;
   const octokit: AppOctokit = {
     rest: {
@@ -185,23 +199,32 @@ function mockOctokit(headSha = 'abc1234def') {
       },
       issues: {
         listLabelsOnIssue: vi.fn(async () => ({ data: [] })),
+        removeLabel: vi.fn(async () => ({})),
         createComment: vi.fn(async (params) => {
-          comments.push({ op: 'create', ...params });
+          record({ op: 'create', ...params });
           return { data: { id: 900 } };
         }),
         updateComment: vi.fn(async (params) => {
-          comments.push({ op: 'update', ...params });
+          record({ op: 'update', ...params });
           return {};
         }),
         listComments: vi.fn(async () => ({ data: [] })),
       },
     },
   };
-  return { octokit, checks, comments };
+  return { octokit, checks, comments, helpComments };
 }
 
-function reporter(overrides: Partial<{ services: string[] }> = {}) {
-  const { octokit, checks, comments } = mockOctokit();
+function reporter(
+  overrides: Partial<{
+    services: string[];
+    resolveUrls: (
+      stack: string,
+      prNumber: number,
+    ) => Promise<Map<string, string[]> | undefined>;
+  }> = {},
+) {
+  const { octokit, checks, comments, helpComments } = mockOctokit();
   const instance = new PstackReporter({
     octokit,
     repo: REPO,
@@ -209,8 +232,9 @@ function reporter(overrides: Partial<{ services: string[] }> = {}) {
     services: overrides.services ?? ['db-seed', 'web'],
     previewDomain: 'preview.housing.cloud',
     pstackBaseUrl: 'https://pstack.housing.cloud',
+    resolveUrls: overrides.resolveUrls,
   });
-  return { reporter: instance, octokit, checks, comments };
+  return { reporter: instance, octokit, checks, comments, helpComments };
 }
 
 /**
@@ -635,5 +659,279 @@ describe('PstackReporter — edge cases', () => {
       (c) => c.op === 'create' && c.name === 'pstack/stack',
     );
     expect(pr2Creates).toHaveLength(2);
+  });
+});
+
+describe('PstackReporter — the help comment', () => {
+  /**
+   * Posted when the checks open, not when they settle: it explains a stack
+   * that is still deploying, which is exactly when a reviewer first wonders
+   * what the pending checks are.
+   */
+  it('posts once, as soon as the checks open', async () => {
+    const { reporter: r, helpComments } = reporter();
+    await r.handle(signal(REAL.jobStarted));
+
+    expect(helpComments).toHaveLength(1);
+    expect(helpComments[0]).toMatchObject({
+      op: 'create',
+      issue_number: 16828,
+    });
+  });
+
+  it('is never posted twice, however many events arrive', async () => {
+    const { reporter: r, helpComments } = reporter();
+    await r.handle(signal(REAL.jobStarted));
+    await r.handle(signal(REAL.containerStarted));
+    await r.handle(signal(REAL.stackTimedout));
+    await r.handle(signal(REAL.healthcheckUpdated));
+
+    expect(helpComments).toHaveLength(1);
+  });
+
+  /** Editing it would defeat the point of it being the stable one. */
+  it('is never edited', async () => {
+    const { reporter: r, helpComments } = reporter();
+    await r.handle(signal(REAL.jobStarted));
+    await r.handle(signal(REAL.stackTimedout));
+
+    expect(helpComments.every((c) => c.op === 'create')).toBe(true);
+  });
+
+  it('stays separate from the status comment', async () => {
+    const { reporter: r, comments, helpComments } = reporter();
+    await r.handle(signal(REAL.jobStarted));
+    await r.handle(signal(REAL.stackTimedout));
+
+    expect(String(helpComments[0]?.body)).toContain(HELP_COMMENT_MARKER);
+    expect(String(comments[0]?.body)).not.toContain(HELP_COMMENT_MARKER);
+  });
+
+  it('describes the checks this reporter actually writes', async () => {
+    const { reporter: r, helpComments } = reporter({ services: ['web'] });
+    await r.handle(signal(REAL.jobStarted));
+
+    const body = String(helpComments[0]?.body);
+    expect(body).toContain('`pstack/web`');
+    expect(body).not.toContain('`pstack/db-seed`');
+  });
+
+  it('is posted once per PR, not once per process', async () => {
+    const { reporter: r, helpComments } = reporter();
+    await r.handle({ type: 'job.started', stack: 'pr-1', action: 'up' });
+    await r.handle({ type: 'job.started', stack: 'pr-2', action: 'up' });
+
+    expect(helpComments.map((c) => c.issue_number)).toEqual([1, 2]);
+  });
+
+  /**
+   * A stack whose name carries no PR number has nowhere to comment; that must
+   * not stop the checks, which key off the head SHA.
+   */
+  it('is skipped for a stack that names no PR', async () => {
+    const { reporter: r, helpComments, checks } = reporter();
+    await r.handle({ type: 'job.started', stack: 'staging', action: 'up' });
+
+    expect(helpComments).toHaveLength(0);
+    expect(checks).toHaveLength(0);
+  });
+
+  /**
+   * The "already posted" set is in-memory, so after a restart GitHub is the
+   * only record that the comment exists. Without the lookup, every restart
+   * during a long-lived PR would add another copy.
+   */
+  it('is not re-posted after a restart', async () => {
+    const { octokit, helpComments } = mockOctokit();
+    const existing = [{ id: 42, body: `x\n\n<!-- ${HELP_COMMENT_MARKER} -->` }];
+    octokit.rest.issues.listComments = vi.fn(async () => ({ data: existing }));
+
+    const fresh = new PstackReporter({
+      octokit,
+      repo: REPO,
+      logger: noopLogger,
+      services: ['web'],
+    });
+    await fresh.handle(signal(REAL.jobStarted));
+
+    expect(helpComments).toHaveLength(0);
+  });
+});
+
+describe('PstackReporter — live preview URLs', () => {
+  /** The whole point of resolving: the real router rule wins over the pattern. */
+  it('shows the URL Traefik serves rather than the assumed one', async () => {
+    const { reporter: r, comments } = reporter({
+      resolveUrls: async () =>
+        new Map([['web', ['https://shop.housing.cloud']]]),
+    });
+    await r.handle(signal(REAL.jobStarted));
+    await r.handle({
+      type: 'stack.ready',
+      stack: 'pr-16828',
+      containers: 4,
+      readyCount: 4,
+    });
+
+    const body = String(comments.at(-1)?.body);
+    expect(body).toContain('https://shop.housing.cloud');
+    expect(body).not.toContain('https://web-pr-16828.preview.housing.cloud');
+  });
+
+  it('falls back to the pattern when pstack cannot be read', async () => {
+    const { reporter: r, comments } = reporter({
+      resolveUrls: async () => undefined,
+    });
+    await r.handle(signal(REAL.jobStarted));
+    await r.handle({
+      type: 'stack.ready',
+      stack: 'pr-16828',
+      containers: 4,
+      readyCount: 4,
+    });
+
+    expect(String(comments.at(-1)?.body)).toContain(
+      'https://web-pr-16828.preview.housing.cloud',
+    );
+  });
+
+  /**
+   * A stack can route a service nobody thought to watch. It has no check run,
+   * but its URL is still the most useful thing on the comment for a reviewer.
+   */
+  it('lists a routed service that has no check of its own', async () => {
+    const { reporter: r, comments } = reporter({
+      services: ['web'],
+      resolveUrls: async () =>
+        new Map([
+          ['web', ['https://web-pr-16828.preview.housing.cloud']],
+          ['storybook', ['https://storybook-pr-16828.preview.housing.cloud']],
+        ]),
+    });
+    await r.handle(signal(REAL.jobStarted));
+    await r.handle({
+      type: 'stack.ready',
+      stack: 'pr-16828',
+      containers: 4,
+      readyCount: 4,
+    });
+
+    expect(String(comments.at(-1)?.body)).toContain(
+      'https://storybook-pr-16828.preview.housing.cloud',
+    );
+  });
+
+  it('is re-read as the stack changes, so a moved route is not stale', async () => {
+    let host = 'https://old.housing.cloud';
+    const { reporter: r, comments } = reporter({
+      resolveUrls: async () => new Map([['web', [host]]]),
+    });
+    await r.handle(signal(REAL.jobStarted));
+    await r.handle({
+      type: 'stack.ready',
+      stack: 'pr-16828',
+      containers: 4,
+      readyCount: 4,
+    });
+    host = 'https://new.housing.cloud';
+    await r.handle({
+      type: 'container.ready',
+      stack: 'pr-16828',
+      container: 'pr-16828-web-1',
+      service: 'web',
+      hasHealthcheck: true,
+    });
+
+    expect(String(comments.at(-1)?.body)).toContain(
+      'https://new.housing.cloud',
+    );
+  });
+
+  it('does not fail the report when resolving throws', async () => {
+    const { reporter: r, comments } = reporter({
+      resolveUrls: async () => {
+        throw new Error('pstack unreachable');
+      },
+    });
+    await r.handle(signal(REAL.jobStarted));
+    await r.handle(signal(REAL.stackTimedout));
+
+    expect(comments).toHaveLength(1);
+  });
+
+  /**
+   * A URL shown next to a failed service is a link to a 502. The check is the
+   * honest signal there, so the link waits for success.
+   */
+  it('withholds the URL of a service that has not come up', async () => {
+    const { reporter: r, comments } = reporter({
+      services: ['web'],
+      resolveUrls: async () =>
+        new Map([['web', ['https://web.housing.cloud']]]),
+    });
+    await r.handle(signal(REAL.jobStarted));
+    await r.handle(signal(REAL.stackTimedout));
+
+    expect(String(comments.at(-1)?.body)).not.toContain(
+      'https://web.housing.cloud',
+    );
+  });
+});
+
+describe('PstackReporter — command feedback', () => {
+  it('reopens every settled check when a command starts', async () => {
+    const { reporter: r, checks } = reporter({ services: ['web'] });
+    await r.handle(signal(REAL.jobStarted));
+    await r.handle({
+      type: 'stack.ready',
+      stack: 'pr-16828',
+      containers: 1,
+      readyCount: 1,
+    });
+    await r.handle({
+      type: 'command.started',
+      stack: 'pr-16828',
+      title: 'Redeploying the preview stack',
+      reason: 'redeploy requested by @alice',
+    });
+
+    expect(latest(checks, 'pstack/stack')?.status).toBe('in_progress');
+    expect(latest(checks, 'pstack/web')?.status).toBe('in_progress');
+    expect(
+      (latest(checks, 'pstack/stack')?.output as { title?: string })?.title,
+    ).toBe('Redeploying the preview stack');
+  });
+
+  it('fails the checks when a command cannot be carried out', async () => {
+    const { reporter: r, checks } = reporter({ services: ['web'] });
+    await r.handle(signal(REAL.jobStarted));
+    await r.handle({
+      type: 'command.failed',
+      stack: 'pr-16828',
+      error:
+        'pstack refused the redeploy: the stack already has a job in flight',
+    });
+
+    expect(latest(checks, 'pstack/stack')?.conclusion).toBe('failure');
+    expect(summaryOf(checks, 'pstack/stack')).toContain('already has a job');
+  });
+
+  it('reports the command on the status comment too', async () => {
+    const { reporter: r, comments } = reporter({ services: ['web'] });
+    await r.handle(signal(REAL.jobStarted));
+    await r.handle({
+      type: 'stack.ready',
+      stack: 'pr-16828',
+      containers: 1,
+      readyCount: 1,
+    });
+    await r.handle({
+      type: 'command.started',
+      stack: 'pr-16828',
+      title: 'Redeploying the preview stack',
+      reason: 'redeploy requested by @alice',
+    });
+
+    expect(String(comments.at(-1)?.body)).toContain('Redeploying');
   });
 });

@@ -39,9 +39,11 @@ import {
   type CheckStatus,
   type RepoRef,
   type AppOctokit,
+  ensureComment,
   upsertCheckRun,
   upsertComment,
 } from '../github/checks';
+import { helpComment } from './help';
 import {
   parseStackIdentity,
   previewUrlFor,
@@ -52,6 +54,9 @@ import {
 
 /** Marker identifying the pstack comment, so it is edited rather than stacked. */
 const PSTACK_COMMENT_MARKER = 'hou-event-automation:pstack-stack';
+
+/** Marker identifying the one-time help comment. */
+export const HELP_COMMENT_MARKER = 'hou-event-automation:cloudybot-help';
 
 /** A pstack event, reduced to the fields the reporter reads. */
 export interface PstackSignal {
@@ -75,7 +80,25 @@ export interface PstackSignal {
   durationMs?: number;
   waitedMs?: number;
   by?: string;
+  /**
+   * Pending-state check title, set only by the synthetic `command.*` signals so
+   * a running command names itself ("Redeploying…") instead of showing the
+   * generic "Preview stack deploying".
+   */
+  title?: string;
 }
+
+/**
+ * The public URLs a stack serves, per compose service.
+ *
+ * Read from pstack's live routing table when the control-plane API is
+ * configured (see `pstack/client.ts`), so the comment links the hostnames
+ * Traefik actually answers on rather than a reconstructed pattern.
+ */
+export type ServiceUrlResolver = (
+  stack: string,
+  prNumber: number,
+) => Promise<ReadonlyMap<string, readonly string[]> | undefined>;
 
 export interface PstackReporterOptions {
   octokit: AppOctokit;
@@ -87,6 +110,17 @@ export interface PstackReporterOptions {
   previewDomain?: string;
   /** pstack dashboard base URL, linked from the checks. */
   pstackBaseUrl?: string;
+  /**
+   * Live per-service URLs from pstack's routing table. When omitted (or when
+   * it returns nothing) the comment falls back to the `previewDomain` pattern.
+   */
+  resolveUrls?: ServiceUrlResolver;
+  /**
+   * Whether the `@cloudybot` commands are actually wired up. Only affects the
+   * help comment: documenting a command the service cannot run is worse than
+   * documenting none.
+   */
+  commandsEnabled?: boolean;
 }
 
 type Phase = 'pending' | 'succeeded' | 'failed';
@@ -105,11 +139,15 @@ interface StackState {
   headSha: string;
   stackPhase: Phase;
   stackDetail?: string;
+  /** Pending-state title while a `@cloudybot` command is running. */
+  pendingTitle?: string;
   stackCheckRunId?: number;
   /** Last stack-check state pushed to GitHub. */
   stackRendered?: string;
   services: Map<string, ServiceState>;
   commentId?: number;
+  /** Live URLs per service, from pstack's routing table. */
+  urls?: ReadonlyMap<string, readonly string[]>;
   /** Serializes GitHub writes so concurrent webhooks cannot interleave. */
   queue: Promise<void>;
 }
@@ -120,6 +158,8 @@ interface StackState {
 export class PstackReporter {
   private readonly stacks = new Map<string, StackState>();
   private readonly blockedStacks = new Set<string>();
+  /** PRs whose help comment this process has already ensured. */
+  private readonly helped = new Set<number>();
   private clearingAll = false;
 
   constructor(private readonly options: PstackReporterOptions) {}
@@ -277,6 +317,46 @@ export class PstackReporter {
         'pstack: opening checks failed',
       );
     }
+    // Requirement: whenever the checks are added to a PR, make sure the PR
+    // also carries the bot's help comment. It is posted after the checks
+    // rather than before so a failure here cannot delay the thing reviewers
+    // are actually waiting on, and it is deliberately separate from the
+    // deployment-status comment: one is a fixed reference, the other is
+    // rewritten on every event.
+    await this.ensureHelpComment(state);
+  }
+
+  /**
+   * Post the usage comment once per PR.
+   *
+   * Guarded twice, because both guards cover a different failure: the
+   * in-process `helped` set stops a second stack on the same PR (`web-pr-12`
+   * and `api-pr-12`) from racing to post two, and `ensureComment` re-checks
+   * GitHub so a restarted process does not post a duplicate.
+   */
+  private async ensureHelpComment(state: StackState): Promise<void> {
+    if (this.helped.has(state.prNumber)) return;
+    this.helped.add(state.prNumber);
+    try {
+      await ensureComment(
+        this.options.octokit,
+        this.options.repo,
+        state.prNumber,
+        HELP_COMMENT_MARKER,
+        helpComment({
+          services: this.options.services,
+          commandsEnabled: this.options.commandsEnabled ?? false,
+          pstackBaseUrl: this.options.pstackBaseUrl,
+        }),
+      );
+    } catch (error) {
+      // Retry on the next stack event rather than never.
+      this.helped.delete(state.prNumber);
+      this.options.logger.error(
+        { stack: state.stack, pr: state.prNumber, error: String(error) },
+        'pstack: posting the help comment failed',
+      );
+    }
   }
 
   private async apply(state: StackState, signal: PstackSignal): Promise<void> {
@@ -298,12 +378,36 @@ export class PstackReporter {
   /** Fold one event into the stack's state. Pure apart from the state object. */
   private reduce(state: StackState, signal: PstackSignal): void {
     switch (signal.type) {
+      // Not a pstack event: a `@cloudybot` command starting work that will
+      // change the answer. Reopening the checks here is what makes the command
+      // visible immediately, rather than the PR looking untouched for the
+      // minutes a redeploy takes.
+      case 'command.started':
+        state.stackPhase = 'pending';
+        state.stackDetail = signal.reason;
+        state.pendingTitle = signal.title;
+        for (const service of state.services.values()) {
+          service.phase = 'pending';
+          service.detail = undefined;
+        }
+        return;
+
+      // The command could not be carried out (pstack refused it, or the wait
+      // itself failed). Left pending, the checks would block the PR on work
+      // that is no longer happening.
+      case 'command.failed':
+        state.stackPhase = 'failed';
+        state.stackDetail = signal.error ?? 'the command failed';
+        this.failPendingServices(state, 'the command failed');
+        return;
+
       // A redeploy of an existing stack: re-open everything so the checks track
       // the new attempt rather than showing the previous run's result.
       case 'job.started':
         if (signal.action === 'up') {
           state.stackPhase = 'pending';
           state.stackDetail = undefined;
+          state.pendingTitle = undefined;
           for (const service of state.services.values()) {
             service.phase = 'pending';
             service.detail = undefined;
@@ -490,6 +594,7 @@ export class PstackReporter {
     // Requirement 4: comment once the stack check has settled. Also refreshed
     // after that, so a later redeploy does not leave a stale comment.
     if (state.stackPhase !== 'pending' || state.commentId !== undefined) {
+      await this.refreshUrls(state);
       state.commentId = await upsertComment(
         this.options.octokit,
         this.options.repo,
@@ -502,6 +607,30 @@ export class PstackReporter {
   }
 
   /**
+   * Refresh the stack's public URLs from pstack, just before the comment that
+   * shows them is written.
+   *
+   * Read at comment time rather than cached from the deploy because routers
+   * are created as containers come up: a table read when the stack check was
+   * still pending would be missing exactly the services the comment is about
+   * to link. Failures leave the previous answer in place: a comment with a
+   * stale URL column, or none, still carries the status the reviewer came for,
+   * so this must not be able to sink the report it decorates.
+   */
+  private async refreshUrls(state: StackState): Promise<void> {
+    if (!this.options.resolveUrls) return;
+    try {
+      const urls = await this.options.resolveUrls(state.stack, state.prNumber);
+      if (urls && urls.size > 0) state.urls = urls;
+    } catch (error) {
+      this.options.logger.debug(
+        { stack: state.stack, error: String(error) },
+        'pstack: resolving preview URLs failed — keeping the previous ones',
+      );
+    }
+  }
+
+  /**
    * Create-or-update the three check runs, skipping any whose rendered content
    * has not moved. A single pstack event usually settles one of the three, and
    * rewriting the other two would spend GitHub API quota storing what is
@@ -509,9 +638,11 @@ export class PstackReporter {
    */
   private async writeChecks(state: StackState): Promise<void> {
     const stackCheck = checkFor(state.stackPhase, {
-      pending: state.stackDetail
-        ? 'Deployment completed; checking readiness'
-        : 'Preview stack deploying',
+      pending:
+        state.pendingTitle ??
+        (state.stackDetail
+          ? 'Deployment completed; checking readiness'
+          : 'Preview stack deploying'),
       succeeded: 'Preview stack ready',
       failed: 'Preview stack did not come up',
     });
@@ -572,7 +703,15 @@ export class PstackReporter {
   /** Requirement 4: the tracked comment carrying status and details. */
   private comment(state: StackState, signal: PstackSignal): string {
     const rows: Array<[string, string]> = [
-      ['Status', phaseBadge(state.stackPhase)],
+      // While a command runs, its title *is* the status — "Pending" alone
+      // would leave a reviewer who just typed `@cloudybot redeploy` unable to
+      // tell whether anything picked it up.
+      [
+        'Status',
+        state.stackPhase === 'pending' && state.pendingTitle
+          ? `🟡 ${state.pendingTitle}`
+          : phaseBadge(state.stackPhase),
+      ],
       ['Stack', `\`${state.stack}\``],
     ];
     if (state.stackDetail) rows.push(['Detail', state.stackDetail]);
@@ -591,18 +730,22 @@ export class PstackReporter {
 
     const services = [...state.services.entries()].map(
       ([service, serviceState]) => {
-        const url = previewUrlFor(
-          service,
-          state.stack,
-          this.options.previewDomain,
-        );
-        const link =
-          serviceState.phase === 'succeeded' && url ? `[${url}](${url})` : '—';
+        const link = this.serviceLinks(state, service, serviceState.phase);
         return `| ${phaseBadge(serviceState.phase)} | \`${service}\` | ${
           serviceState.detail ?? 'waiting'
         } | ${link} |`;
       },
     );
+
+    // A stack routes hostnames the checks know nothing about — a `docs` or
+    // `mail` surface behind its own router. They are what a reviewer opens, so
+    // they are listed rather than dropped for not matching PSTACK_SERVICES.
+    const extra = [...(state.urls?.entries() ?? [])]
+      .filter(([service]) => !state.services.has(service))
+      .map(
+        ([service, urls]) =>
+          `| ⚪ Routed | \`${service}\` | not watched | ${linkList(urls)} |`,
+      );
 
     return [
       '### Preview stack',
@@ -614,8 +757,38 @@ export class PstackReporter {
       '| Status | Service | Detail | URL |',
       '| --- | --- | --- | --- |',
       ...services,
+      ...extra,
     ].join('\n');
   }
+
+  /**
+   * The URL cell for one service.
+   *
+   * Live routes win over the `<service>-<stack>.<domain>` pattern, because they
+   * are what Traefik is actually serving: the pattern is pstack's *default*
+   * router rule, and a spec that sets its own rule, port or domain makes the
+   * reconstructed link a 404 that looks authoritative. The pattern stays as the
+   * fallback for when the control-plane API is not configured.
+   *
+   * A URL is shown only once the service is up. Under HTTP-01 the certificate
+   * for a hostname is issued on its first request and only once a container
+   * answers, so advertising the link earlier hands a reviewer a TLS error.
+   */
+  private serviceLinks(
+    state: StackState,
+    service: string,
+    phase: Phase,
+  ): string {
+    if (phase !== 'succeeded') return '—';
+    const live = state.urls?.get(service);
+    if (live && live.length > 0) return linkList(live);
+    const url = previewUrlFor(service, state.stack, this.options.previewDomain);
+    return url ? `[${url}](${url})` : '—';
+  }
+}
+
+function linkList(urls: readonly string[]): string {
+  return urls.map((url) => `[${url}](${url})`).join('<br>');
 }
 
 /** Snapshot of everything the GitHub side renders, for change detection. */
@@ -623,7 +796,7 @@ function snapshot(state: StackState): string {
   const services = [...state.services.entries()]
     .map(([name, s]) => `${name}:${s.phase}:${s.detail ?? ''}`)
     .join('|');
-  return `${state.stackPhase}:${state.stackDetail ?? ''}:${services}`;
+  return `${state.stackPhase}:${state.stackDetail ?? ''}:${state.pendingTitle ?? ''}:${services}`;
 }
 
 function checkFor(

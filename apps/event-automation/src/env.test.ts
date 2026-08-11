@@ -128,3 +128,71 @@ describe('loadEnv', () => {
     expect(() => loadEnv(raw({ PORT: '70000' }))).toThrow(/PORT/);
   });
 });
+
+describe('loadEnv — the pstack control-plane API', () => {
+  it('leaves the API unconfigured by default', () => {
+    const env = loadEnv(raw());
+    expect(env.pstackApiUrl).toBeUndefined();
+    expect(env.pstackApiToken).toBeUndefined();
+  });
+
+  it('accepts a URL and a token', () => {
+    const env = loadEnv(
+      raw({
+        PSTACK_API_URL: 'https://api.preview.housing.cloud',
+        PSTACK_API_TOKEN: 'pstack_pat_x',
+      }),
+    );
+    expect(env.pstackApiUrl).toBe('https://api.preview.housing.cloud');
+    expect(env.pstackApiToken).toBe('pstack_pat_x');
+  });
+
+  /** The client joins paths onto this, so a trailing slash would double up. */
+  it('normalises a trailing slash', () => {
+    expect(
+      loadEnv(raw({ PSTACK_API_URL: 'https://api.preview.housing.cloud/' }))
+        .pstackApiUrl,
+    ).toBe('https://api.preview.housing.cloud');
+  });
+
+  it('rejects a URL that is not one', () => {
+    expect(() => loadEnv(raw({ PSTACK_API_URL: 'api.preview' }))).toThrow();
+  });
+
+  /**
+   * A token without a URL means someone configured the API and mistyped the
+   * variable name. Silently ignoring it would leave the commands off with no
+   * sign of why.
+   */
+  it('rejects a token with no URL', () => {
+    expect(() => loadEnv(raw({ PSTACK_API_TOKEN: 'pstack_pat_x' }))).toThrow(
+      /PSTACK_API_URL/,
+    );
+  });
+
+  it('allows an unauthenticated API, which pstack permits', () => {
+    expect(
+      loadEnv(raw({ PSTACK_API_URL: 'https://api.preview.housing.cloud' }))
+        .pstackApiToken,
+    ).toBeUndefined();
+  });
+
+  it('defaults the command timeout to ten minutes', () => {
+    expect(loadEnv(raw()).pstackCommandTimeoutMs).toBe(600_000);
+  });
+
+  it('parses an explicit command timeout', () => {
+    expect(
+      loadEnv(raw({ PSTACK_COMMAND_TIMEOUT_MS: '90000' }))
+        .pstackCommandTimeoutMs,
+    ).toBe(90_000);
+  });
+
+  it('rejects a command timeout that is not a positive number', () => {
+    for (const value of ['0', '-1', 'soon']) {
+      expect(() => loadEnv(raw({ PSTACK_COMMAND_TIMEOUT_MS: value }))).toThrow(
+        /PSTACK_COMMAND_TIMEOUT_MS/,
+      );
+    }
+  });
+});

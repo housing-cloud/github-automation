@@ -29,6 +29,7 @@
         "@samyx/gha-plugin-preview-stacks": "0.0.0-pre.23-rx",
         "@samyx/gha-ui": "0.0.0-pre.23-rx",
         "@samyx/github-automation-suite": "0.0.0-pre.23-rx",
+        "@samyx/preview-stacks-client": "0.25.3",
         "hono": "^4.12.26",
         "octokit": "^4.1.4",
         "rxjs": "^7.8.2",
@@ -388,6 +389,8 @@
     "@samyx/gha-web-kit": ["@samyx/gha-web-kit@0.0.0-pre.23-rx", "", {}, "sha512-fR8VKAeVoKgPxnHhF0e/H1TSxnbcipscTwKIH42kqoyujNtZ2vI2wLdqCqnBiBRP0JCwEkggBLyc693KkE1skA=="],
 
     "@samyx/github-automation-suite": ["@samyx/github-automation-suite@0.0.0-pre.23-rx", "", { "dependencies": { "@samyx/gha-blocks": "0.0.0-pre.23-rx", "@samyx/gha-coordinator-rxjs": "0.0.0-pre.23-rx", "@samyx/gha-core": "0.0.0-pre.23-rx", "@samyx/gha-express": "0.0.0-pre.23-rx", "@samyx/gha-fastify": "0.0.0-pre.23-rx", "@samyx/gha-hono": "0.0.0-pre.23-rx", "@samyx/gha-node": "0.0.0-pre.23-rx", "@samyx/gha-plugin-coolify": "0.0.0-pre.23-rx", "@samyx/gha-plugin-dokploy": "0.0.0-pre.23-rx", "@samyx/gha-plugin-event-log": "0.0.0-pre.23-rx", "@samyx/gha-plugin-gcloud": "0.0.0-pre.23-rx", "@samyx/gha-plugin-github": "0.0.0-pre.23-rx", "@samyx/gha-plugin-preview-stacks": "0.0.0-pre.23-rx", "@samyx/gha-plugin-vercel": "0.0.0-pre.23-rx", "@samyx/gha-web-kit": "0.0.0-pre.23-rx" }, "peerDependencies": { "cel-js": "^0.8.2", "express": "^4.19.0 || ^5.0.0", "fastify": "^4.0.0 || ^5.0.0", "hono": "^4.12.26", "octokit": "^4.1.4", "rxjs": "^7.8.0", "zod": "^4.3.6" }, "optionalPeers": ["cel-js", "express", "fastify", "hono", "octokit", "rxjs"] }, "sha512-7alRhvcupqTB0y1m+3PBV8wM3xD5ggDWwXSzpCPH2B8YN9Wx6rQ53uT+fLeyDM8E9e6cIpPVwSoUsVfaakeHKQ=="],
+
+    "@samyx/preview-stacks-client": ["@samyx/preview-stacks-client@0.25.3", "", {}, "sha512-Mvbd1yR1cSqa0J4Cwr6sqH/uk+GUNFW5ZLKDIsas3m+o1fRK7ot5kRrPsCJLkrGV4lh5Ugsbmlx1bO+v/6zWaQ=="],
 
     "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
 

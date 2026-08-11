@@ -19,6 +19,7 @@
     "@samyx/gha-plugin-preview-stacks": "0.0.0-pre.23-rx",
     "@samyx/gha-ui": "0.0.0-pre.23-rx",
     "@samyx/github-automation-suite": "0.0.0-pre.23-rx",
+    "@samyx/preview-stacks-client": "0.25.3",
     "hono": "^4.12.26",
     "octokit": "^4.1.4",
     "rxjs": "^7.8.2",

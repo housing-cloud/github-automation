@@ -253,3 +253,260 @@ console.log(
 
 server.stop(true);
 await automation.dispose();
+
+// ── @cloudybot commands, against a stub pstack API over real HTTP ──────────
+//
+// A second instance, because the commands only exist when PSTACK_API_URL is
+// set. Everything here is real except pstack itself and GitHub: a signed
+// GitHub webhook goes in, and the pstack API calls plus check runs come out.
+console.log('\n--- @cloudybot commands ---');
+
+const pstackCalls: string[] = [];
+const pstackApi = Bun.serve({
+  port: 8098,
+  fetch(request) {
+    const url = new URL(request.url);
+    pstackCalls.push(`${request.method} ${url.pathname}`);
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), {
+        headers: { 'content-type': 'application/json' },
+      });
+
+    if (url.pathname === '/api/deployments') {
+      return json({
+        deployments: [
+          {
+            id: 'pr-16828',
+            stack: 'pr-16828',
+            kind: 'isolated',
+            busy: false,
+            running: true,
+          },
+        ],
+      });
+    }
+    if (url.pathname.endsWith('/up')) {
+      return json({
+        job: {
+          id: 'job-boot',
+          stack: 'pr-16828',
+          action: 'up',
+          state: 'running',
+          startedAt: 0,
+        },
+      });
+    }
+    if (url.pathname.startsWith('/api/jobs/')) {
+      return json({
+        job: {
+          id: 'job-boot',
+          stack: 'pr-16828',
+          action: 'up',
+          state: 'ok',
+          startedAt: 0,
+          endedAt: 1000,
+        },
+      });
+    }
+    if (url.pathname.endsWith('/restart')) {
+      return json({
+        container: 'pr-16828-web-1',
+        action: 'restart',
+        note: 'ok',
+      });
+    }
+    if (url.pathname.endsWith('/runtime')) {
+      return json({
+        stack: 'pr-16828',
+        reachable: true,
+        challenge: 'dns01',
+        findings: [],
+        containers: [
+          {
+            id: 'c1',
+            name: 'pr-16828-web-1',
+            service: 'web',
+            image: 'web',
+            state: 'running',
+            health: 'healthy',
+            exitCode: null,
+            restartCount: 0,
+            networks: [],
+            ingressIp: null,
+            ports: [],
+            traefikLabels: {},
+          },
+        ],
+        routes: [
+          {
+            router: 'r-web',
+            container: 'pr-16828-web-1',
+            rule: 'Host(`shop-pr-16828.hou.test`)',
+            hosts: ['shop-pr-16828.hou.test'],
+            service: 'web',
+            port: 3000,
+            entrypoints: 'websecure',
+            tls: true,
+            certresolver: null,
+            priority: null,
+            target: null,
+          },
+        ],
+      });
+    }
+    if (url.pathname.endsWith('/readiness')) {
+      return json({
+        id: 'pr-16828',
+        stack: 'pr-16828',
+        state: 'ready',
+        startedAt: 0,
+        endedAt: 2000,
+        reachable: true,
+        timeoutMs: 180_000,
+        containers: [
+          {
+            name: 'pr-16828-web-1',
+            service: 'web',
+            state: 'running',
+            health: 'healthy',
+            hasHealthcheck: true,
+            exitCode: null,
+            restartCount: 0,
+            ready: true,
+            failed: false,
+          },
+        ],
+      });
+    }
+    return new Response('{}', { status: 404 });
+  },
+});
+
+const commandEnv = loadEnv({
+  GITHUB_APP_ID: '1',
+  GITHUB_APP_PRIVATE_KEY: 'x',
+  GITHUB_APP_INSTALLATION_ID: '42',
+  GITHUB_ORG: 'housing-cloud',
+  GITHUB_ALLOWED_REPOS: 'repo-a',
+  GITHUB_WEBHOOK_SECRET: 'gh-secret',
+  PSTACK_WEBHOOK_SECRET: 'whsec_boot',
+  PSTACK_CHECKS_WEBHOOK_SECRET: 'checks-secret',
+  PSTACK_REPO: 'repo-a',
+  PSTACK_PREVIEW_DOMAIN: 'preview.hou.test',
+  PSTACK_API_URL: `http://localhost:${pstackApi.port}`,
+  PSTACK_API_TOKEN: 'pstack_pat_boot',
+  FLOW_RUN_DB_PATH: ':memory:',
+  PORT: '8097',
+} as NodeJS.ProcessEnv);
+
+const removedLabels: string[] = [];
+const commandOctokit = {
+  rest: {
+    ...octokit.rest,
+    issues: {
+      ...octokit.rest.issues,
+      removeLabel: async (p: any) => {
+        removedLabels.push(p.name);
+        console.log('  LABEL remove:', p.name);
+        return {};
+      },
+      createComment: async (p: any) => {
+        const kind = String(p.body).includes('Preview stack bot')
+          ? 'help'
+          : 'status';
+        console.log(`  COMMENT create (${kind}) on PR`, p.issue_number);
+        return { data: { id: 3 } };
+      },
+    },
+  },
+};
+
+const commandApp = await createEventAutomation({
+  env: commandEnv,
+  octokit: commandOctokit as any,
+  // Without this the reporter and the command runner log to `noopLogger`, and a
+  // command that failed would look identical to one that worked.
+  logger: {
+    trace: () => {},
+    debug: (v: any, m?: string) => console.log('  debug:', m ?? '', v),
+    info: (v: any, m?: string) => console.log('  info:', m ?? '', v),
+    warn: (v: any, m?: string) => console.log('  warn:', m ?? '', v),
+    error: (v: any, m?: string) => console.log('  ERROR:', m ?? '', v),
+  },
+});
+const commandServer = Bun.serve({ port: 8097, fetch: commandApp.app.fetch });
+console.log('commands enabled:', commandApp.commands !== undefined);
+
+async function postGithub(event: string, body: string, delivery: string) {
+  const res = await fetch('http://localhost:8097/webhooks/github', {
+    method: 'POST',
+    headers: {
+      'x-github-event': event,
+      'x-github-delivery': delivery,
+      'content-type': 'application/json',
+      'x-hub-signature-256':
+        'sha256=' +
+        createHmac('sha256', 'gh-secret').update(body).digest('hex'),
+    },
+    body,
+  });
+  console.log(`POST /webhooks/github [${event}] ->`, res.status);
+  // The command runs detached; drain it rather than sleeping on a guess.
+  await commandApp.commands?.drain();
+}
+
+await postGithub(
+  'issue_comment',
+  JSON.stringify({
+    action: 'created',
+    issue: { number: 16828, pull_request: { url: 'x' } },
+    comment: {
+      id: 1,
+      body: '@cloudybot redeploy',
+      user: { login: 'alice', type: 'User' },
+    },
+    repository: {
+      name: 'repo-a',
+      full_name: 'housing-cloud/repo-a',
+      owner: { login: 'housing-cloud' },
+    },
+  }),
+  'd-comment-cmd',
+);
+
+await postGithub(
+  'pull_request',
+  JSON.stringify({
+    action: 'labeled',
+    number: 16828,
+    label: { name: 'cloudy-restart' },
+    sender: { login: 'alice' },
+    pull_request: {
+      number: 16828,
+      head: {
+        sha: 'deadbeefcafe',
+        ref: 'feature',
+        repo: {
+          full_name: 'housing-cloud/repo-a',
+          name: 'repo-a',
+          owner: { login: 'housing-cloud' },
+        },
+      },
+      base: { ref: 'main' },
+      labels: [{ name: 'cloudy-restart' }],
+    },
+    repository: {
+      name: 'repo-a',
+      full_name: 'housing-cloud/repo-a',
+      owner: { login: 'housing-cloud' },
+    },
+  }),
+  'd-label-cmd',
+);
+
+console.log('pstack API calls:', pstackCalls.join(', '));
+console.log('labels removed:', removedLabels.join(', ') || '(none)');
+
+commandServer.stop(true);
+pstackApi.stop(true);
+await commandApp.dispose();

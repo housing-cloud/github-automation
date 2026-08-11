@@ -6,11 +6,15 @@ import {
 } from '@samyx/gha-plugin-preview-stacks';
 import { buildGithubRule } from '@samyx/github-automation-suite/plugins/github';
 import type { AppEnv } from './env';
+import type { PstackCommands } from './pstack/commands';
+import { parseCommentCommand, parseLabelCommand } from './pstack/commands';
 import type { PstackReporter, PstackSignal } from './pstack/reporter';
 
 export interface CreateRulesOptions {
   env: AppEnv;
   pstack: PstackReporter;
+  /** Present only when the pstack control-plane API is configured. */
+  commands?: PstackCommands;
 }
 
 /**
@@ -85,7 +89,117 @@ export function createRules(options: CreateRulesOptions): Rule[] {
         ),
       ],
     }),
+
+    ...commandRules(options),
   ];
+}
+
+/**
+ * The `@cloudybot` command rules — one for comments, one for labels.
+ *
+ * Registered only when the control-plane API is configured: a rule that
+ * acknowledges `@cloudybot redeploy` and then cannot redeploy anything is worse
+ * than no rule, and the dashboard's rule list would advertise it.
+ *
+ * Two rules rather than one because the trigger events carry the command in
+ * different places (a comment body vs. a label name), and keeping them apart
+ * means the dashboard shows which trigger fired.
+ */
+function commandRules(options: CreateRulesOptions): Rule[] {
+  const { commands } = options;
+  if (!commands) return [];
+
+  return [
+    buildGithubRule({
+      name: 'cloudybot-command-comment',
+      // `issue_comment` covers PR comments: GitHub delivers a PR's conversation
+      // comments as issue comments, and a PR is an issue in that number space.
+      // `.edited` is included so fixing a typo in the command runs it.
+      events: ['issue_comment.created', 'issue_comment.edited'],
+      handlers: [
+        withHandlerDescription(
+          commentCommandHandler(commands),
+          'run the @cloudybot recheck/redeploy/restart command in a PR comment',
+        ),
+      ],
+    }),
+
+    buildGithubRule({
+      name: 'cloudybot-command-label',
+      events: ['pull_request.labeled'],
+      handlers: [
+        withHandlerDescription(
+          labelCommandHandler(commands),
+          'run the cloudy-recheck/redeploy/restart command applied as a label',
+        ),
+      ],
+    }),
+  ];
+}
+
+/**
+ * A command in a PR comment.
+ *
+ * Two guards worth naming. **Issues are excluded**: `issue_comment` fires for
+ * both, and only a PR has a preview stack. And **the bot's own comments are
+ * ignored** — the help comment lists `@cloudybot redeploy` in a table, so a
+ * service that read its own comments would redeploy every stack it ever
+ * documented.
+ */
+function commentCommandHandler(commands: PstackCommands): HandlerSpec {
+  return {
+    critical: false,
+    run: async (ctx) => {
+      const payload = ctx.event.raw as {
+        issue?: { number?: number; pull_request?: unknown };
+        comment?: { body?: string; user?: { login?: string; type?: string } };
+      };
+      if (!payload.issue?.pull_request) return;
+      if (payload.comment?.user?.type === 'Bot') return;
+
+      const prNumber = ctx.event.data.prNumber ?? payload.issue.number;
+      const command = parseCommentCommand(payload.comment?.body ?? '');
+      if (prNumber === undefined || !command) return;
+
+      ctx.logger.info(
+        { pr: prNumber, command, by: payload.comment?.user?.login },
+        'pstack: accepted a @cloudybot comment command',
+      );
+      commands.accept({
+        command,
+        prNumber,
+        actor: payload.comment?.user?.login,
+      });
+    },
+  };
+}
+
+/** A command applied as a `cloudy-*` label. */
+function labelCommandHandler(commands: PstackCommands): HandlerSpec {
+  return {
+    critical: false,
+    run: async (ctx) => {
+      const payload = ctx.event.raw as {
+        label?: { name?: string };
+        sender?: { login?: string };
+      };
+      const prNumber = ctx.event.data.prNumber;
+      const label = payload.label?.name;
+      const command = label ? parseLabelCommand(label) : undefined;
+      if (prNumber === undefined || !command || !label) return;
+
+      ctx.logger.info(
+        { pr: prNumber, command, label, by: payload.sender?.login },
+        'pstack: accepted a cloudy-* label command',
+      );
+      commands.accept({
+        command,
+        prNumber,
+        label,
+        actor: payload.sender?.login,
+      });
+    },
+  };
 }
 
 /**

@@ -7,11 +7,13 @@ import { toHono } from '@samyx/github-automation-suite/hono';
 import { githubPlugin } from '@samyx/github-automation-suite/plugins/github';
 import { eventLogPlugin } from '@samyx/github-automation-suite/plugins/event-log';
 import { eventLogRoutes } from '@samyx/github-automation-suite/plugins/event-log/hono';
-import { previewStacksPlugin } from '@samyx/gha-plugin-preview-stacks';
 import { Hono, type MiddlewareHandler } from 'hono';
 import type { AppEnv } from './env';
 import { type AppOctokit, clearPstackChecks } from './github/checks';
 import { createOctokit } from './github/octokit';
+import { createPstackClient, readServiceUrls } from './pstack/client';
+import { PstackCommands } from './pstack/commands';
+import { previewStacksIngress } from './pstack/ingress';
 import { PstackReporter } from './pstack/reporter';
 import { parseStackIdentity } from './pstack/stack';
 import { createRules } from './rules';
@@ -36,6 +38,8 @@ export interface CreateEventAutomationOptions {
 export interface EventAutomationApp {
   app: Hono;
   pstack: PstackReporter;
+  /** Present only when the pstack control-plane API is configured. */
+  commands?: PstackCommands;
   flowRuns: FlowRunStore;
   dispose(): Promise<void>;
 }
@@ -67,6 +71,18 @@ export async function createEventAutomation(
     });
   const coordinator = new RxjsCoordinator({ logger, runs: flowRuns });
 
+  // The control-plane client is optional: without `PSTACK_API_URL` the service
+  // is purely push-driven — it reports what pstack sends and cannot ask it
+  // anything. With it, the comment carries the live routing table's URLs and
+  // the `@cloudybot` commands are registered.
+  const client = env.pstackApiUrl
+    ? createPstackClient({
+        baseUrl: env.pstackApiUrl,
+        token: env.pstackApiToken,
+        fetch: options.fetch,
+      })
+    : undefined;
+
   // pstack reports on one repo's preview stacks: its payloads name a stack
   // (`pr-16828`) and never a repository, so the repo comes from config.
   const pstack =
@@ -78,7 +94,22 @@ export async function createEventAutomation(
       services: env.pstackServices,
       previewDomain: env.pstackPreviewDomain,
       pstackBaseUrl: env.pstackBaseUrl,
+      commandsEnabled: client !== undefined,
+      resolveUrls: client
+        ? (stack, prNumber) => readServiceUrls(client, stack, prNumber, logger)
+        : undefined,
     });
+
+  const commands = client
+    ? new PstackCommands({
+        client,
+        reporter: pstack,
+        octokit,
+        repo: { owner: env.githubOrg, name: env.pstackRepo },
+        logger,
+        readyTimeoutMs: env.pstackCommandTimeoutMs,
+      })
+    : undefined;
 
   const engine = await createEngine({
     logger: options.logger,
@@ -93,13 +124,16 @@ export async function createEventAutomation(
         octokit,
       }),
       // pstack signs its envelope (HMAC over `timestamp + "." + rawBody`), so
-      // this ingress is genuinely authenticated rather than token-gated.
-      previewStacksPlugin({
+      // this ingress is genuinely authenticated rather than token-gated. The
+      // check itself is the client package's `verifyWebhook` — see
+      // `pstack/ingress.ts` for why.
+      previewStacksIngress({
         secret: env.pstackWebhookSecret,
         toleranceMs: env.pstackToleranceMs,
+        logger,
       }),
     ],
-    rules: createRules({ env, pstack }),
+    rules: createRules({ env, pstack, commands }),
   });
 
   const app = toHono(engine);
@@ -216,9 +250,13 @@ export async function createEventAutomation(
   return {
     app,
     pstack,
+    commands,
     flowRuns,
     async dispose() {
       try {
+        // Let an accepted command finish writing its verdict onto the checks;
+        // abandoning it would leave them pending with nothing to settle them.
+        await commands?.drain();
         await engine.dispose();
       } finally {
         if ('close' in flowRuns && typeof flowRuns.close === 'function')

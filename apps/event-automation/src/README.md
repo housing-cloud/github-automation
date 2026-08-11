@@ -45,8 +45,9 @@ Each is enforced by a test built on real captured payloads:
    have.) So the PR number is parsed from `pr-<N>` in the stack name and the head
    SHA is fetched from the GitHub API, because a check run must hang off a commit.
 2. **A green job is not a running app.** `job.succeeded` for an `up` means the
-   commands ran; `compose up -d` returns once containers are *created*. Only the
-   readiness watch decides, ending in exactly one of `stack.ready`,
+   commands ran; `compose up -d` returns once containers are *created*. It moves
+   the check to “Deployment completed; checking readiness” but keeps it pending.
+   Only the readiness watch decides, ending in exactly one of `stack.ready`,
    `stack.failed` or `stack.timedout`.
 3. **A container that never starts may emit no event of its own.** In a real
    `stack.timedout` the only trace of the failure was

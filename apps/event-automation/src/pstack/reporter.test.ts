@@ -83,6 +83,23 @@ const REAL = {
       startedAt: 1786378437511,
     },
   },
+  jobSucceeded: {
+    id: 'evt_msnvxsr7_o_pyxv5n',
+    event: 'job.succeeded',
+    at: 1786405882579,
+    data: {
+      jobId: 'up-pr-16828-2-zhhhxy',
+      stack: 'pr-16828',
+      action: 'up',
+      state: 'ok',
+      startedAt: 1786404404604,
+      endedAt: 1786405882579,
+      durationMs: 1477975,
+      leakedAxes: [],
+      verified: null,
+      unverifiable: 0,
+    },
+  },
   jobFailed: {
     id: 'evt_msngvem0_3_msyvpz',
     event: 'job.failed',

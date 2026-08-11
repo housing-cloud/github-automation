@@ -207,6 +207,58 @@ describe('event-automation app (pstack preview stacks)', () => {
     expect(created.every((c) => c.status === 'in_progress')).toBe(true);
   });
 
+  it('accepts the real job.succeeded and keeps the stack check pending', async () => {
+    const { app, octokit } = await buildApp();
+    const at = Date.now();
+
+    await postPstack(app, {
+      id: 'evt_started_before_success',
+      event: 'job.started',
+      at,
+      data: {
+        jobId: 'up-pr-16828-2-zhhhxy',
+        stack: 'pr-16828',
+        action: 'up',
+        startedAt: 1786404404604,
+      },
+    });
+    await drain();
+
+    const res = await postPstack(app, {
+      id: 'evt_msnvxsr7_o_pyxv5n',
+      event: 'job.succeeded',
+      at,
+      data: {
+        jobId: 'up-pr-16828-2-zhhhxy',
+        stack: 'pr-16828',
+        action: 'up',
+        state: 'ok',
+        startedAt: 1786404404604,
+        endedAt: 1786405882579,
+        durationMs: 1477975,
+        leakedAxes: [],
+        verified: null,
+        unverifiable: 0,
+      },
+    });
+    expect(res.status).toBe(200);
+    await drain();
+
+    const update = octokit.checkRuns.find(
+      (call) =>
+        call.op === 'update' &&
+        (call.output as { title?: string } | undefined)?.title ===
+          'Deployment completed; checking readiness',
+    );
+    expect(update).toMatchObject({
+      status: 'in_progress',
+      conclusion: undefined,
+    });
+    expect(
+      (update?.output as { summary?: string } | undefined)?.summary,
+    ).toContain('deploy job succeeded in 1478s; checking container readiness');
+  });
+
   it('rejects a pstack delivery with a bad signature', async () => {
     const { app, octokit } = await buildApp();
 

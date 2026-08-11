@@ -66,7 +66,7 @@ In pstack → **Notifiers → New**, create one of **type `webhook`** (a
 - **Events**: at minimum
 
   ```
-  job.started, job.failed, job.leaked, job.cancelled,
+  job.started, job.succeeded, job.failed, job.leaked, job.cancelled,
   stack.ready, stack.failed, stack.timedout,
   container.ready, container.start-failed, container.stopped
   ```
@@ -88,7 +88,8 @@ than the tolerance is rejected as a replay.
 Two behaviours worth knowing, both taken from pstack's own semantics:
 
 - **`job.succeeded` does not pass `pstack/stack`.** For an `up`, it means the
-  commands ran — `compose up -d` returns once containers are *created*. The
+  commands ran — `compose up -d` returns once containers are *created*. The event
+  updates the pending check to “Deployment completed; checking readiness”; the
   readiness watch that follows is what decides, and it always ends in exactly one
   of `stack.ready` / `stack.failed` / `stack.timedout`.
 - **The stack name is the PR link.** pstack's payloads for `job.*`, `stack.*` and

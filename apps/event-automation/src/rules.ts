@@ -45,6 +45,8 @@ export function createRules(options: CreateRulesOptions): Rule[] {
       events: [
         // Deploy lifecycle -> the stack check.
         'job.started',
+        // Commands completed; the check stays pending until stack.ready.
+        'job.succeeded',
         'job.failed',
         'job.leaked',
         'job.cancelled',

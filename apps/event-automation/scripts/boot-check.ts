@@ -130,6 +130,18 @@ await postPstack('job.started', {
   action: 'up',
   startedAt: 1786378437511,
 });
+await postPstack('job.succeeded', {
+  jobId: 'up-pr-16828-2-zhhhxy',
+  stack: 'pr-16828',
+  action: 'up',
+  state: 'ok',
+  startedAt: 1786404404604,
+  endedAt: 1786405882579,
+  durationMs: 1477975,
+  leakedAxes: [],
+  verified: null,
+  unverifiable: 0,
+});
 await postPstack('container.ready', {
   stack: 'pr-16828',
   container: 'pr-16828-db-seed-1',

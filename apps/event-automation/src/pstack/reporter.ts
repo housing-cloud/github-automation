@@ -262,8 +262,19 @@ export class PstackReporter {
         return;
 
       // `job.succeeded` for an `up` means the commands ran, NOT that the app is
-      // up — the readiness watch that follows is what decides. So it is
-      // deliberately not treated as success here.
+      // up — `compose up -d` returns once containers are created. Record the
+      // hand-off to the readiness watch, but keep the stack check pending until
+      // `stack.ready` / `stack.failed` / `stack.timedout` supplies the verdict.
+      case 'job.succeeded':
+        if (signal.action === 'up' && state.stackPhase === 'pending') {
+          const duration =
+            signal.durationMs === undefined
+              ? ''
+              : ` in ${Math.max(1, Math.round(signal.durationMs / 1000))}s`;
+          state.stackDetail = `deploy job succeeded${duration}; checking container readiness`;
+        }
+        return;
+
       case 'job.failed':
       case 'job.leaked':
         if (signal.action === 'up' || signal.type === 'job.leaked') {
@@ -448,7 +459,9 @@ export class PstackReporter {
    */
   private async writeChecks(state: StackState): Promise<void> {
     const stackCheck = checkFor(state.stackPhase, {
-      pending: 'Preview stack deploying',
+      pending: state.stackDetail
+        ? 'Deployment completed; checking readiness'
+        : 'Preview stack deploying',
       succeeded: 'Preview stack ready',
       failed: 'Preview stack did not come up',
     });

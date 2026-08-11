@@ -31,7 +31,7 @@
     "turbo": "2.9.5",
     "vitest": "^3.2.6",
     "wait-on": "^8.0.5",
-    "webpack": "5.99.9"
+    "webpack": "5.104.1"
   },
   "scripts": {
     "validate:pre-push": "bun run biome check --diagnostic-level=error --files-ignore-unknown=true"

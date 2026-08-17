@@ -24,6 +24,7 @@ function env(overrides: Partial<AppEnv> = {}): AppEnv {
     pstackPreviewDomain: 'preview.hou.test',
     eventLogLimit: 500,
     pstackCommandTimeoutMs: 10 * 60_000,
+    prOpenedComment: false,
     flowRunDbPath: ':memory:',
     flowRunLimit: 200,
     port: 8080,
@@ -1418,5 +1419,146 @@ describe('event-automation app (@cloudybot commands)', () => {
     );
     expect(help).toHaveLength(1);
     expect(help[0]?.issue_number).toBe(16828);
+  });
+});
+
+/**
+ * The preview-labels explainer on a newly opened PR, driven end to end through
+ * a signed GitHub webhook.
+ */
+describe('event-automation app (PR opened explainer)', () => {
+  const EnabledEnv: Partial<AppEnv> = { prOpenedComment: true };
+
+  it('comments on a newly opened PR', async () => {
+    const { app, octokit } = await buildApp({ envOverrides: EnabledEnv });
+
+    const res = await postGithub(app, githubPrBody('opened'), 'd-open-1');
+    expect(res.status).toBe(200);
+    await drain();
+
+    expect(octokit.comments).toHaveLength(1);
+    expect(octokit.comments[0]).toMatchObject({
+      op: 'create',
+      issue_number: 16828,
+      repo: 'repo-a',
+    });
+  });
+
+  it('explains all three labels', async () => {
+    const { app, octokit } = await buildApp({ envOverrides: EnabledEnv });
+    await postGithub(app, githubPrBody('opened'), 'd-open-2');
+    await drain();
+
+    const body = String(octokit.comments[0]?.body);
+    for (const label of ['preview', 'no-preview', 'preserve-preview']) {
+      expect(body).toContain(`\`${label}\``);
+    }
+  });
+
+  /** Off by default: it writes to every opened PR, so it must be asked for. */
+  it('stays silent when the flag is not set', async () => {
+    const { app, octokit } = await buildApp();
+
+    const res = await postGithub(app, githubPrBody('opened'), 'd-open-3');
+    expect(res.status).toBe(200);
+    await drain();
+
+    expect(octokit.comments).toHaveLength(0);
+  });
+
+  it('does not comment on other pull_request actions', async () => {
+    const { app, octokit } = await buildApp({ envOverrides: EnabledEnv });
+
+    await postGithub(app, githubPrBody('synchronize'), 'd-open-4');
+    await postGithub(app, githubPrBody('closed'), 'd-open-5');
+    await drain();
+
+    expect(octokit.comments).toHaveLength(0);
+  });
+
+  /**
+   * GitHub delivery is at-least-once, and a redelivered `opened` would
+   * otherwise add a second copy. The marker lookup is what prevents it, which
+   * also covers a restart between the two deliveries.
+   */
+  it('does not post twice when the PR already carries the comment', async () => {
+    const octokit = mockOctokit();
+    const { app } = await buildApp({ envOverrides: EnabledEnv, octokit });
+
+    await postGithub(app, githubPrBody('opened'), 'd-open-6');
+    await drain();
+    expect(octokit.comments).toHaveLength(1);
+
+    // The PR now carries it, exactly as GitHub would report on a redelivery.
+    const posted = String(octokit.comments[0]?.body);
+    octokit.rest.issues.listComments = vi.fn(async () => ({
+      data: [{ id: 1, body: posted }],
+    }));
+
+    await postGithub(app, githubPrBody('opened'), 'd-open-7');
+    await drain();
+
+    expect(octokit.comments).toHaveLength(1);
+  });
+
+  it('comments on the PR’s own repo', async () => {
+    const { app, octokit } = await buildApp({
+      envOverrides: {
+        ...EnabledEnv,
+        githubAllowedRepos: new Set(['repo-a', 'repo-b']),
+      },
+    });
+
+    await postGithub(
+      app,
+      githubPrBody('opened', { repo: 'repo-b', number: 7 }),
+      'd-open-8',
+    );
+    await drain();
+
+    expect(octokit.comments[0]).toMatchObject({
+      repo: 'repo-b',
+      issue_number: 7,
+    });
+  });
+
+  it('ignores a repo outside GITHUB_ALLOWED_REPOS', async () => {
+    const { app, octokit } = await buildApp({ envOverrides: EnabledEnv });
+
+    await postGithub(
+      app,
+      githubPrBody('opened', { repo: 'not-allowed' }),
+      'd-open-9',
+    );
+    await drain();
+
+    expect(octokit.comments).toHaveLength(0);
+  });
+
+  /**
+   * The explainer and the pstack help comment are different artefacts with
+   * different triggers: this one when the PR opens, the other when a stack's
+   * checks first open. A PR that gets both must carry both.
+   */
+  it('is separate from the pstack help comment', async () => {
+    const { app, octokit } = await buildApp({ envOverrides: EnabledEnv });
+
+    await postGithub(app, githubPrBody('opened'), 'd-open-10');
+    await drain();
+    await postPstack(app, {
+      id: 'evt_open_stack',
+      event: 'job.started',
+      at: Date.now(),
+      data: { stack: 'pr-16828', action: 'up' },
+    });
+    await drain();
+
+    const bodies = octokit.comments.map((c) => String(c.body));
+    expect(
+      bodies.filter((b) => b.includes('Preview stacks on this PR')),
+    ).toHaveLength(1);
+    expect(bodies.filter((b) => b.includes('Preview stack bot'))).toHaveLength(
+      1,
+    );
   });
 });

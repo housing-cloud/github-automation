@@ -42,7 +42,7 @@ https://<service-host>/webhooks/github
 `pull_request.closed` is acted on to release the closed PR's in-memory state.
 Everything else about a preview arrives from pstack, not from GitHub.
 
-With the control-plane API configured (§3), two more subscriptions are needed,
+With the control-plane API configured (§4), two more subscriptions are needed,
 because that is how a `@cloudybot` command reaches the service:
 
 | Event | Why |
@@ -65,7 +65,7 @@ This is what drives the three new check runs and the "Preview stack" PR comment.
 | `PSTACK_BASE_URL` | optional | pstack dashboard URL, linked from the checks and the comment. |
 | `PSTACK_PREVIEW_DOMAIN` | optional | Preview domain, used to build `<service>-<stack>.<domain>` URLs in the comment. |
 | `PSTACK_TOLERANCE_MS` | optional | Replay window. Defaults to `300000` (5 minutes). |
-| `PSTACK_API_URL` | optional | pstack API base URL. Enables live preview URLs and the `@cloudybot` commands — see §3. |
+| `PSTACK_API_URL` | optional | pstack API base URL. Enables live preview URLs and the `@cloudybot` commands — see §4. |
 | `PSTACK_API_TOKEN` | optional | pstack PAT for that API. Rejected at startup without `PSTACK_API_URL`. |
 
 ### The notifier
@@ -150,9 +150,44 @@ The help comment is posted when the checks first open — which is when a review
 first sees three pending checks and wonders what they are. It is never edited,
 so it stays a stable reference; the status comment is the one that churns.
 
+A third comment, the **preview-labels explainer**, is posted when the PR is
+opened rather than when a stack appears — see §3.
+
 ---
 
-## 3. The pstack control-plane API (optional)
+## 3. The preview-labels explainer (optional)
+
+```
+PR_OPENED_COMMENT=true
+```
+
+Comments once on every newly opened PR in `GITHUB_ALLOWED_REPOS`, explaining the
+three labels that decide whether the PR gets a preview stack:
+
+| Label | Effect |
+| --- | --- |
+| `preview` | Run a preview stack for this PR. Transitional — previews become the default for every PR later, and this label then stops being needed. |
+| `no-preview` | Do not run a preview while the label is present. Wins over `preview`, and is the one to reach for once previews are the default. |
+| `preserve-preview` | Keep the preview running after the PR is closed, instead of tearing it down. |
+
+**These labels are enforced by pstack, not by this service.** This flow only
+documents them, which is why it is a separate switch: the explainer is useful
+exactly when a reviewer has not yet learned the convention.
+
+Notes:
+
+- **Off by default.** It writes to every opened PR, including ones that will
+  never get a preview, so switching it on is a per-deployment decision.
+- **Posted once, never edited.** Deduped by a marker read back from GitHub, so a
+  redelivered `opened` event or a restart cannot produce a second copy.
+- **`opened` only.** Not `reopened` or `synchronize` — the PR already has it.
+- **On the PR's own repo,** not `PSTACK_REPO`, since it is a reply to the PR
+  that was opened. The existing **Pull requests** webhook subscription is all it
+  needs.
+
+---
+
+## 4. The pstack control-plane API (optional)
 
 Without it, the service is purely push-driven: it reports what pstack sends and
 can ask it nothing. Setting `PSTACK_API_URL` turns on two things.
@@ -215,7 +250,7 @@ than one that stays quiet, and the help comment says so.
 
 ---
 
-## 4. Tuning (all optional)
+## 5. Tuning (all optional)
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
@@ -226,6 +261,7 @@ than one that stays quiet, and the help comment says so.
 | `PSTACK_API_URL` | — | pstack API base URL. Enables live preview URLs and the `@cloudybot` commands. |
 | `PSTACK_API_TOKEN` | — | pstack PAT for that API. Requires `PSTACK_API_URL`. |
 | `PSTACK_COMMAND_TIMEOUT_MS` | `600000` (10m) | How long a command waits for readiness before leaving the checks pending. |
+| `PR_OPENED_COMMENT` | `false` | Comment the preview-labels explainer on every newly opened PR. See §3. |
 | `EVENT_LOG_LIMIT` | `500` | Rows retained by the in-memory webhook log. |
 | `EVENT_LOG_TOKEN` | — | Bearer token gating `/events` and `/dashboard`. **Set this** if the service is publicly reachable. |
 | `FLOW_RUN_DB_PATH` | `./data/flow-runs.sqlite` (`/data/flow-runs.sqlite` in the container) | SQLite file for dashboard flow-run history. |
@@ -234,7 +270,7 @@ than one that stays quiet, and the help comment says so.
 
 ---
 
-## 5. Checklist
+## 6. Checklist
 
 - [ ] GitHub App created, with the five permissions above.
 - [ ] App installed on the org, scoped to the repos in `GITHUB_ALLOWED_REPOS`.
@@ -257,23 +293,29 @@ than one that stays quiet, and the help comment says so.
 - [ ] For the `@cloudybot` commands and live preview URLs: `PSTACK_API_URL` set,
       `PSTACK_API_TOKEN` issued from **pstack → Tokens**, and the GitHub App
       subscribed to **Issue comments** as well as **Pull requests**.
+- [ ] `PR_OPENED_COMMENT` decided: on if the team is still learning the
+      `preview` / `no-preview` / `preserve-preview` convention, off once it is
+      second nature.
 
 ### Smoke test
 
 1. `GET /health` → `{"status":"ok"}`.
 2. `GET /` → the route index lists `/webhooks/github` and
    `/webhooks/preview-stacks`.
-3. Deploy a pstack stack named `pr-<number>` for an open PR. The PR gains
+3. With `PR_OPENED_COMMENT=true`: open a PR. It gains a **Preview stacks on this
+   PR** comment listing the three labels. Redeliver that `opened` webhook from
+   the App's Advanced tab — still exactly one copy.
+4. Deploy a pstack stack named `pr-<number>` for an open PR. The PR gains
    `pstack/stack`, `pstack/db-seed` and `pstack/web` checks in progress.
-4. A one-time **Preview stack bot** comment appears explaining the checks.
-5. `GET /previews` → the stack appears in `stacks`.
-6. As the containers report, the checks settle green or red and a
+5. A one-time **Preview stack bot** comment appears explaining the checks.
+6. `GET /previews` → the stack appears in `stacks`.
+7. As the containers report, the checks settle green or red and a
    "Preview stack" comment appears with the status and the preview URLs.
-7. With `PSTACK_API_URL` set: comment `@cloudybot recheck` on that PR. The checks
+8. With `PSTACK_API_URL` set: comment `@cloudybot recheck` on that PR. The checks
    reopen within seconds and settle again, and no deploy runs. Then apply the
    `cloudy-recheck` label: the same happens and the label removes itself.
-8. Close the PR → `GET /previews` drops it (the state is released).
-9. pstack → the notifier's **Test** button is deliberately a no-op here: test
-   deliveries reuse the `job.succeeded` event name and are excluded.
-10. `GET /dashboard/api/flow-runs` → `enabled: true`; after composed flows run,
+9. Close the PR → `GET /previews` drops it (the state is released).
+10. pstack → the notifier's **Test** button is deliberately a no-op here: test
+    deliveries reuse the `job.succeeded` event name and are excluded.
+11. `GET /dashboard/api/flow-runs` → `enabled: true`; after composed flows run,
     their history remains visible after restarting the container.

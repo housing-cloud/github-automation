@@ -11,11 +11,12 @@ config, rules and the pstack reporter.
 src/
 ├── index.ts                 # Bun entry: loadEnv -> createEventAutomation -> { port, fetch }
 ├── app.ts                   # wires the github + preview-stacks plugins + rules -> Hono
-├── rules.ts                 # pstack events -> the reporter; @cloudybot -> commands
+├── rules.ts                 # pstack events -> reporter; @cloudybot -> commands; PR opened -> explainer
 ├── env.ts                   # Zod-validated environment -> AppEnv
 ├── flow-runs/sqlite.ts      # persistent FlowRunStore for coordinator + dashboard
 ├── github/checks.ts         # check-run + PR-comment upserts (create-or-update)
 ├── github/octokit.ts        # the shared installation client
+├── github/pr-opened.ts      # the preview-labels explainer (PR_OPENED_COMMENT)
 ├── pstack/reporter.ts       # pstack events -> 3 check runs + a tracked PR comment
 ├── pstack/client.ts         # @samyx/preview-stacks-client: live URLs, readiness, verify
 ├── pstack/commands.ts       # @cloudybot recheck / restart / redeploy
@@ -44,6 +45,20 @@ Alongside it, a **"Preview stack bot" comment** is posted once when the checks
 first open — which is when a reviewer first sees three pending checks and wonders
 what they are — explaining the checks and the commands. It is never edited, so it
 stays a stable reference while the status comment churns.
+
+## The preview-labels explainer (optional)
+
+With `PR_OPENED_COMMENT` set, a newly opened PR gets a third comment explaining
+the labels that decide whether it gets a preview at all: `preview` (opt in;
+transitional, previews become the default later), `no-preview` (suppress it
+while the label is present) and `preserve-preview` (keep the stack after the PR
+closes).
+
+The labels are enforced by pstack, not here — this flow only documents them,
+which is why it is a separate switch from everything else. It fires on
+`pull_request.opened` only, comments on the PR's own repo, and is deduped
+against GitHub so a redelivered event cannot post a second copy. Off by default,
+since it writes to every opened PR including ones that will never get a preview.
 
 ## Three details that shape the implementation
 

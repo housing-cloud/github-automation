@@ -6,6 +6,8 @@ import {
 } from '@samyx/gha-plugin-preview-stacks';
 import { buildGithubRule } from '@samyx/github-automation-suite/plugins/github';
 import type { AppEnv } from './env';
+import { type AppOctokit, ensureComment } from './github/checks';
+import { PR_OPENED_COMMENT_MARKER, prOpenedComment } from './github/pr-opened';
 import type { PstackCommands } from './pstack/commands';
 import { parseCommentCommand, parseLabelCommand } from './pstack/commands';
 import type { PstackReporter, PstackSignal } from './pstack/reporter';
@@ -15,6 +17,8 @@ export interface CreateRulesOptions {
   pstack: PstackReporter;
   /** Present only when the pstack control-plane API is configured. */
   commands?: PstackCommands;
+  /** Used by the PR-opened explainer. Absent in the pstack-only tests. */
+  octokit?: AppOctokit;
 }
 
 /**
@@ -91,7 +95,68 @@ export function createRules(options: CreateRulesOptions): Rule[] {
     }),
 
     ...commandRules(options),
+    ...prOpenedRules(options),
   ];
+}
+
+/**
+ * The preview-labels explainer on a newly opened PR.
+ *
+ * Off unless `PR_OPENED_COMMENT` is set, because it writes to *every* opened PR
+ * in the allowed repos, including ones that will never get a preview stack.
+ * That is a per-deployment decision, not a default.
+ */
+function prOpenedRules(options: CreateRulesOptions): Rule[] {
+  const { env, octokit } = options;
+  if (!env.prOpenedComment || !octokit) return [];
+
+  return [
+    buildGithubRule({
+      name: 'pr-opened-preview-labels',
+      // `reopened` is deliberately excluded: the PR already has the comment
+      // from the first time, and `ensureComment` would only re-confirm that.
+      events: ['pull_request.opened'],
+      handlers: [
+        withHandlerDescription(
+          prOpenedCommentHandler(options),
+          'explain the preview labels on a newly opened PR',
+        ),
+      ],
+    }),
+  ];
+}
+
+/**
+ * Post the explainer once.
+ *
+ * The comment goes on the PR's **own** repo rather than `PSTACK_REPO`: this is
+ * a reply to the PR that was just opened, and the engine has already limited
+ * that to `GITHUB_ALLOWED_REPOS`.
+ */
+function prOpenedCommentHandler(options: CreateRulesOptions): HandlerSpec {
+  const { env, octokit } = options;
+  return {
+    critical: false,
+    run: async (ctx) => {
+      const prNumber = ctx.event.data.prNumber;
+      const repo = ctx.event.data.repo;
+      if (prNumber === undefined || !repo || !octokit) return;
+
+      // `ensureComment` re-checks GitHub, so a redelivered `opened` — or a
+      // restart mid-delivery — cannot produce a second copy.
+      const created = await ensureComment(
+        octokit,
+        repo,
+        prNumber,
+        PR_OPENED_COMMENT_MARKER,
+        prOpenedComment({ pstackBaseUrl: env.pstackBaseUrl }),
+      );
+      ctx.logger.info(
+        { pr: prNumber, repo: repo.name, created: created !== undefined },
+        'pr: posted the preview-labels explainer',
+      );
+    },
+  };
 }
 
 /**

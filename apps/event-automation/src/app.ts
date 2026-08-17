@@ -133,7 +133,7 @@ export async function createEventAutomation(
         logger,
       }),
     ],
-    rules: createRules({ env, pstack, commands }),
+    rules: createRules({ env, pstack, commands, octokit }),
   });
 
   const app = toHono(engine);

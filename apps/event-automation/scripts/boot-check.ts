@@ -510,3 +510,90 @@ console.log('labels removed:', removedLabels.join(', ') || '(none)');
 commandServer.stop(true);
 pstackApi.stop(true);
 await commandApp.dispose();
+
+// ── PR_OPENED_COMMENT: the preview-labels explainer ────────────────────────
+console.log('\n--- PR opened explainer ---');
+
+const openedComments: string[] = [];
+const openedOctokit = {
+  rest: {
+    ...octokit.rest,
+    issues: {
+      ...octokit.rest.issues,
+      createComment: async (p: any) => {
+        openedComments.push(String(p.body));
+        console.log('  COMMENT create on PR', p.issue_number);
+        return { data: { id: 9 } };
+      },
+    },
+  },
+};
+
+const openedApp = await createEventAutomation({
+  env: loadEnv({
+    GITHUB_APP_ID: '1',
+    GITHUB_APP_PRIVATE_KEY: 'x',
+    GITHUB_APP_INSTALLATION_ID: '42',
+    GITHUB_ORG: 'housing-cloud',
+    GITHUB_ALLOWED_REPOS: 'repo-a',
+    GITHUB_WEBHOOK_SECRET: 'gh-secret',
+    PSTACK_WEBHOOK_SECRET: 'whsec_boot',
+    PSTACK_CHECKS_WEBHOOK_SECRET: 'checks-secret',
+    PSTACK_REPO: 'repo-a',
+    PSTACK_BASE_URL: 'https://pstack.test',
+    PR_OPENED_COMMENT: 'true',
+    FLOW_RUN_DB_PATH: ':memory:',
+    PORT: '8096',
+  } as NodeJS.ProcessEnv),
+  octokit: openedOctokit as any,
+});
+const openedServer = Bun.serve({ port: 8096, fetch: openedApp.app.fetch });
+
+const openedBody = JSON.stringify({
+  action: 'opened',
+  number: 4242,
+  pull_request: {
+    number: 4242,
+    head: {
+      sha: 'abc1234567890',
+      ref: 'feature',
+      repo: {
+        full_name: 'housing-cloud/repo-a',
+        name: 'repo-a',
+        owner: { login: 'housing-cloud' },
+      },
+    },
+    base: { ref: 'main' },
+    labels: [],
+  },
+  repository: {
+    name: 'repo-a',
+    full_name: 'housing-cloud/repo-a',
+    owner: { login: 'housing-cloud' },
+  },
+});
+const opened = await fetch('http://localhost:8096/webhooks/github', {
+  method: 'POST',
+  headers: {
+    'x-github-event': 'pull_request',
+    'x-github-delivery': 'd-opened',
+    'content-type': 'application/json',
+    'x-hub-signature-256':
+      'sha256=' +
+      createHmac('sha256', 'gh-secret').update(openedBody).digest('hex'),
+  },
+  body: openedBody,
+});
+console.log('POST /webhooks/github [opened] ->', opened.status);
+await new Promise((r) => setTimeout(r, 150));
+
+const explainer = openedComments[0] ?? '';
+console.log(
+  'labels explained:',
+  ['preview', 'no-preview', 'preserve-preview']
+    .filter((label) => explainer.includes('`' + label + '`'))
+    .join(', ') || '(none)',
+);
+
+openedServer.stop(true);
+await openedApp.dispose();

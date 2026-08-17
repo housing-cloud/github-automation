@@ -22,6 +22,7 @@ export const envSchema = z.object({
   PSTACK_PREVIEW_DOMAIN: z.string().optional(),
   PSTACK_TOLERANCE_MS: z.string().optional(),
   PSTACK_COMMAND_TIMEOUT_MS: z.string().optional(),
+  PR_OPENED_COMMENT: z.string().optional(),
   EVENT_LOG_LIMIT: z.string().optional(),
   EVENT_LOG_TOKEN: z.string().optional(),
   FLOW_RUN_DB_PATH: z.string().min(1).optional(),
@@ -63,6 +64,12 @@ export interface AppEnv {
   pstackToleranceMs?: number;
   /** How long a `@cloudybot` command waits for readiness. Defaults to 10m. */
   pstackCommandTimeoutMs: number;
+  /**
+   * Post the preview-labels explainer on every newly opened PR. Off by default:
+   * it writes to PRs that may have no preview stack at all, so switching it on
+   * is a deliberate choice per deployment.
+   */
+  prOpenedComment: boolean;
   /** Max rows retained by the in-memory event log (LRU). Defaults to 500. */
   eventLogLimit: number;
   /**
@@ -136,6 +143,11 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
       10 * 60_000,
       'PSTACK_COMMAND_TIMEOUT_MS',
     ),
+    prOpenedComment: parseBoolean(
+      parsed.PR_OPENED_COMMENT,
+      false,
+      'PR_OPENED_COMMENT',
+    ),
     eventLogLimit: parseEventLogLimit(parsed.EVENT_LOG_LIMIT),
     eventLogToken: parsed.EVENT_LOG_TOKEN,
     flowRunDbPath: parsed.FLOW_RUN_DB_PATH ?? './data/flow-runs.sqlite',
@@ -175,6 +187,27 @@ function parseDuration(
     throw new Error(`${name} must be an integer >= 1000 (milliseconds)`);
   }
   return ms;
+}
+
+/**
+ * A feature switch.
+ *
+ * Deliberately strict rather than truthy: `PR_OPENED_COMMENT=false` read as
+ * "on" because the string is non-empty is the classic way a flag silently
+ * means its opposite, and this one writes to every opened PR.
+ */
+function parseBoolean(
+  value: string | undefined,
+  fallback: boolean,
+  name: string,
+): boolean {
+  if (value === undefined || value.trim() === '') return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  throw new Error(
+    `${name} must be a boolean (true/false, 1/0, yes/no, on/off)`,
+  );
 }
 
 function parseCsvSet(value: string): ReadonlySet<string> {

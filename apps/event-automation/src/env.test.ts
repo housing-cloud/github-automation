@@ -196,3 +196,36 @@ describe('loadEnv — the pstack control-plane API', () => {
     }
   });
 });
+
+describe('loadEnv — PR_OPENED_COMMENT', () => {
+  it('is off unless asked for', () => {
+    expect(loadEnv(raw()).prOpenedComment).toBe(false);
+  });
+
+  it('accepts the usual ways of writing yes', () => {
+    for (const value of ['true', 'TRUE', '1', 'yes', 'on', ' true ']) {
+      expect(loadEnv(raw({ PR_OPENED_COMMENT: value })).prOpenedComment).toBe(
+        true,
+      );
+    }
+  });
+
+  /**
+   * The failure this rules out: a truthy check would read `false` as "on",
+   * because it is a non-empty string. This flag writes to every opened PR, so
+   * silently meaning its opposite is the expensive direction.
+   */
+  it('reads every spelling of no as off', () => {
+    for (const value of ['false', 'FALSE', '0', 'no', 'off', '']) {
+      expect(loadEnv(raw({ PR_OPENED_COMMENT: value })).prOpenedComment).toBe(
+        false,
+      );
+    }
+  });
+
+  it('rejects a value that is neither', () => {
+    expect(() => loadEnv(raw({ PR_OPENED_COMMENT: 'maybe' }))).toThrow(
+      /PR_OPENED_COMMENT/,
+    );
+  });
+});

@@ -597,3 +597,115 @@ console.log(
 
 openedServer.stop(true);
 await openedApp.dispose();
+
+// ── Bulk approvals: list and gh-stack, over real HTTP ──────────────────────
+console.log('\n--- bulk approvals ---');
+
+const APPROVAL_KEY = 'k'.repeat(40);
+const approvedPrs: number[] = [];
+const approvalOctokit = {
+  request: async (route: string) => {
+    if (route.includes('stacks/{stack_number}')) {
+      return {
+        data: {
+          number: 500,
+          base: { ref: 'main' },
+          open: true,
+          pull_requests: [
+            { number: 10, state: 'closed', merged_at: '2026-01-01' },
+            { number: 11, state: 'open', merged_at: null },
+            { number: 12, state: 'open', merged_at: null },
+          ],
+        },
+      };
+    }
+    return { data: {} };
+  },
+  rest: {
+    ...octokit.rest,
+    pulls: {
+      ...octokit.rest.pulls,
+      get: async (p: any) => ({
+        data: {
+          head: { sha: `sha-${p.pull_number}` },
+          html_url: `https://github.com/housing-cloud/repo-a/pull/${p.pull_number}`,
+          state: 'open',
+          draft: false,
+          merged: false,
+        },
+      }),
+      listReviews: async () => ({ data: [] }),
+      createReview: async (p: any) => {
+        approvedPrs.push(p.pull_number);
+        console.log('  APPROVE PR', p.pull_number);
+        return { data: { id: p.pull_number } };
+      },
+    },
+  },
+};
+
+const approvalsApp = await createEventAutomation({
+  env: loadEnv({
+    GITHUB_APP_ID: '1',
+    GITHUB_APP_PRIVATE_KEY: 'x',
+    GITHUB_APP_INSTALLATION_ID: '42',
+    GITHUB_ORG: 'housing-cloud',
+    GITHUB_ALLOWED_REPOS: 'repo-a',
+    GITHUB_WEBHOOK_SECRET: 'gh-secret',
+    PSTACK_WEBHOOK_SECRET: 'whsec_boot',
+    PSTACK_CHECKS_WEBHOOK_SECRET: 'checks-secret',
+    PSTACK_REPO: 'repo-a',
+    APPROVALS_WEBHOOK_SECRET: APPROVAL_KEY,
+    FLOW_RUN_DB_PATH: ':memory:',
+    PORT: '8095',
+  } as NodeJS.ProcessEnv),
+  octokit: approvalOctokit as any,
+});
+const approvalsServer = Bun.serve({
+  port: 8095,
+  fetch: approvalsApp.app.fetch,
+});
+
+async function postApprovals(
+  body: unknown,
+  init: { key?: string; query?: string } = {},
+): Promise<Response> {
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+  };
+  if (init.key) headers['x-api-key'] = init.key;
+  const url = init.query
+    ? `http://localhost:8095/webhooks/approvals?${init.query}`
+    : 'http://localhost:8095/webhooks/approvals';
+  return await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  });
+}
+
+console.log(
+  'POST /webhooks/approvals (no key) ->',
+  (await postApprovals({ prs: [11] })).status,
+  '(expected 401)',
+);
+console.log(
+  'POST /webhooks/approvals (wrong key) ->',
+  (await postApprovals({ prs: [11] }, { key: 'x'.repeat(40) })).status,
+  '(expected 401)',
+);
+
+const listRes = await postApprovals({ prs: [11, 12] }, { key: APPROVAL_KEY });
+console.log('POST /webhooks/approvals [prs] ->', listRes.status);
+console.log('  ', await listRes.text());
+
+const stackRes = await postApprovals(
+  { stack: 500, body: 'stack approved' },
+  { query: `key=${APPROVAL_KEY}` },
+);
+console.log('POST /webhooks/approvals [stack, key in URL] ->', stackRes.status);
+console.log('  ', await stackRes.text());
+console.log('approved in total:', approvedPrs.join(', '));
+
+approvalsServer.stop(true);
+await approvalsApp.dispose();

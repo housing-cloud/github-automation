@@ -26,7 +26,7 @@ read-only bot.
 | Permission | Level | Why |
 | --- | --- | --- |
 | **Checks** | Read & write | create + update the three preview check runs |
-| **Pull requests** | Read & write | read the PR head commit, and post/edit the comment |
+| **Pull requests** | Read & write | read the PR head commit, post/edit the comment, and submit approving reviews (§5) |
 | **Issues** | Read & write | PR comments are issue comments in the REST API |
 | **Contents** | Read-only | resolve the PR head commit |
 | **Metadata** | Read-only | mandatory baseline |
@@ -250,7 +250,83 @@ than one that stays quiet, and the help comment says so.
 
 ---
 
-## 5. Tuning (all optional)
+## 5. Bulk PR approval (optional)
+
+```
+APPROVALS_WEBHOOK_SECRET=$(openssl rand -hex 32)
+```
+
+Approves a list of pull requests, or every open PR in a
+[`gh stack`](https://github.com/github/gh-stack), in one call. Reviewing the top
+of a stack means approving every layer beneath it, and doing that by hand is
+both tedious and easy to leave half-done.
+
+```bash
+# An explicit list
+curl -X POST https://<service-host>/webhooks/approvals \
+  -H "X-Api-Key: $APPROVALS_WEBHOOK_SECRET" \
+  -H 'Content-Type: application/json' \
+  -d '{"prs":[16828,16829],"body":"approved by release automation"}'
+
+# Every open PR in a stack (the number may be the stack's, or any PR in it)
+curl -X POST "https://<service-host>/webhooks/approvals?key=$APPROVALS_WEBHOOK_SECRET" \
+  -H 'Content-Type: application/json' \
+  -d '{"stack":500}'
+```
+
+| Field | Meaning |
+| --- | --- |
+| `prs` | Array of PR numbers. At most 50 per call. |
+| `stack` | A stack number, or any PR number in the stack. Mutually exclusive with `prs`. |
+| `body` | Optional review body shown on the approval. |
+| `drafts` | Approve draft PRs too. Off by default. |
+
+### The key
+
+Accepted as `X-Api-Key: <key>`, `Authorization: Bearer <key>`, or `?key=` /
+`?token=` in the URL. The query forms exist for callers that cannot set headers
+(a CI `curl`, a chat-ops button, a webhook field that only takes a URL); they
+are also the leakier forms, since URLs reach logs and shell history.
+
+- **Unset disables the route entirely** — it returns 404 rather than existing
+  unguarded. There is no safe default for something that approves code.
+- **Minimum 32 characters,** enforced at startup. This one key is the whole
+  authorization story for the route.
+- Compared in constant time, since there is no signature to fall back on.
+
+### What it refuses
+
+Every refusal is per PR and reported in the response, because a bulk call
+picking up an unintended PR is the failure that matters:
+
+| Case | Result |
+| --- | --- |
+| Already merged, or closed | `skipped` |
+| Draft | `skipped` unless `"drafts": true` |
+| Already approved by this App | `already-approved`, no second review |
+| Unknown PR, or GitHub refused | `failed`, with the reason |
+
+Merged layers of a stack are left out of the results entirely: landing a stack
+bottom-up leaves them behind, and reporting them on every call would bury the
+PRs that actually moved.
+
+### Status codes
+
+| Code | Meaning |
+| --- | --- |
+| `200` | Nothing failed (some may have been skipped or already approved) |
+| `207` | Mixed: at least one approved and at least one failed |
+| `502` | Every PR failed |
+| `400` | Malformed body |
+| `401` | Missing or wrong key |
+| `404` | No such stack, or the route is not configured |
+
+A partial failure is deliberately **not** a 200: a caller that only checks the
+status code must not read "nine of ten approved" as a clean success.
+
+---
+
+## 6. Tuning (all optional)
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
@@ -262,6 +338,7 @@ than one that stays quiet, and the help comment says so.
 | `PSTACK_API_TOKEN` | — | pstack PAT for that API. Requires `PSTACK_API_URL`. |
 | `PSTACK_COMMAND_TIMEOUT_MS` | `600000` (10m) | How long a command waits for readiness before leaving the checks pending. |
 | `PR_OPENED_COMMENT` | `false` | Comment the preview-labels explainer on every newly opened PR. See §3. |
+| `APPROVALS_WEBHOOK_SECRET` | — | Key for the bulk-approval webhook. Unset disables the route. See §5. |
 | `EVENT_LOG_LIMIT` | `500` | Rows retained by the in-memory webhook log. |
 | `EVENT_LOG_TOKEN` | — | Bearer token gating `/events` and `/dashboard`. **Set this** if the service is publicly reachable. |
 | `FLOW_RUN_DB_PATH` | `./data/flow-runs.sqlite` (`/data/flow-runs.sqlite` in the container) | SQLite file for dashboard flow-run history. |
@@ -270,7 +347,7 @@ than one that stays quiet, and the help comment says so.
 
 ---
 
-## 6. Checklist
+## 7. Checklist
 
 - [ ] GitHub App created, with the five permissions above.
 - [ ] App installed on the org, scoped to the repos in `GITHUB_ALLOWED_REPOS`.
@@ -296,6 +373,8 @@ than one that stays quiet, and the help comment says so.
 - [ ] `PR_OPENED_COMMENT` decided: on if the team is still learning the
       `preview` / `no-preview` / `preserve-preview` convention, off once it is
       second nature.
+- [ ] `APPROVALS_WEBHOOK_SECRET` generated (`openssl rand -hex 32`) only if bulk
+      approval is wanted; leaving it unset keeps the route off.
 
 ### Smoke test
 
@@ -319,3 +398,7 @@ than one that stays quiet, and the help comment says so.
     deliveries reuse the `job.succeeded` event name and are excluded.
 11. `GET /dashboard/api/flow-runs` → `enabled: true`; after composed flows run,
     their history remains visible after restarting the container.
+12. With `APPROVALS_WEBHOOK_SECRET` set: `POST /webhooks/approvals` with no key
+    → 401. With the key and `{"prs":[<an open PR>]}` → 200 and an approving
+    review appears. Repeat the same call → 200 with `already-approved` and no
+    second review.

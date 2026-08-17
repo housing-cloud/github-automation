@@ -61,6 +61,8 @@ function mockOctokit(): AppOctokit & {
       pulls: {
         get: vi.fn(async () => ({ data: { head: { sha: 'head-sha' } } })),
         list: vi.fn(async () => ({ data: [] })),
+        createReview: vi.fn(async () => ({ data: { id: 1 } })),
+        listReviews: vi.fn(async () => ({ data: [] })),
       },
       issues: {
         listLabelsOnIssue: vi.fn(async () => ({ data: [] })),
@@ -1560,5 +1562,326 @@ describe('event-automation app (PR opened explainer)', () => {
     expect(bodies.filter((b) => b.includes('Preview stack bot'))).toHaveLength(
       1,
     );
+  });
+});
+
+/**
+ * The bulk-approval webhook, driven over its real HTTP surface.
+ *
+ * The auth cases come first and are the reason this route exists behind a key:
+ * everything past the guard writes approvals onto pull requests.
+ */
+describe('event-automation app (bulk approvals)', () => {
+  const Key = 'a'.repeat(40);
+  const ApprovalsEnv: Partial<AppEnv> = { approvalsWebhookSecret: Key };
+
+  function post(
+    app: HonoLike,
+    body: unknown,
+    init: { key?: string; header?: string; query?: string } = {},
+  ) {
+    const headers: Record<string, string> = {
+      'content-type': 'application/json',
+    };
+    if (init.key) headers['x-api-key'] = init.key;
+    if (init.header) headers.authorization = init.header;
+    const url = init.query
+      ? `http://local/webhooks/approvals?${init.query}`
+      : 'http://local/webhooks/approvals';
+    return app.fetch(
+      new Request(url, {
+        method: 'POST',
+        headers,
+        body: typeof body === 'string' ? body : JSON.stringify(body),
+      }),
+    );
+  }
+
+  /** An Octokit that records approvals and can answer the stacks endpoints. */
+  function approvalOctokit(stackPayload?: unknown) {
+    const octokit = mockOctokit();
+    const approved: number[] = [];
+    octokit.rest.pulls.get = vi.fn(
+      async ({ pull_number }: { pull_number: number }) => ({
+        data: {
+          head: { sha: `sha-${pull_number}` },
+          html_url: `https://github.com/housing-cloud/repo-a/pull/${pull_number}`,
+          state: 'open',
+          draft: false,
+          merged: false,
+        },
+      }),
+    ) as typeof octokit.rest.pulls.get;
+    octokit.rest.pulls.createReview = vi.fn(
+      async ({ pull_number }: { pull_number: number }) => {
+        approved.push(pull_number);
+        return { data: { id: pull_number } };
+      },
+    ) as typeof octokit.rest.pulls.createReview;
+    const request = vi.fn(async () => ({ data: stackPayload }));
+    return { octokit: Object.assign(octokit, { request }), approved };
+  }
+
+  describe('the key', () => {
+    it('rejects a request with no key at all', async () => {
+      const { octokit, approved } = approvalOctokit();
+      const { app } = await buildApp({ envOverrides: ApprovalsEnv, octokit });
+
+      const res = await post(app, { prs: [1] });
+      expect(res.status).toBe(401);
+      expect(approved).toEqual([]);
+    });
+
+    it('rejects a wrong key', async () => {
+      const { octokit, approved } = approvalOctokit();
+      const { app } = await buildApp({ envOverrides: ApprovalsEnv, octokit });
+
+      expect(
+        (await post(app, { prs: [1] }, { key: 'b'.repeat(40) })).status,
+      ).toBe(401);
+      // A prefix of the real key must not pass either.
+      expect(
+        (await post(app, { prs: [1] }, { key: 'a'.repeat(39) })).status,
+      ).toBe(401);
+      expect(approved).toEqual([]);
+    });
+
+    it('accepts the key in a header', async () => {
+      const { octokit } = approvalOctokit();
+      const { app } = await buildApp({ envOverrides: ApprovalsEnv, octokit });
+
+      expect((await post(app, { prs: [1] }, { key: Key })).status).toBe(200);
+    });
+
+    it('accepts the key as a bearer token', async () => {
+      const { octokit } = approvalOctokit();
+      const { app } = await buildApp({ envOverrides: ApprovalsEnv, octokit });
+
+      const res = await post(app, { prs: [1] }, { header: `Bearer ${Key}` });
+      expect(res.status).toBe(200);
+    });
+
+    /** For callers that can only put the key in a URL. */
+    it('accepts the key as a search param', async () => {
+      const { octokit } = approvalOctokit();
+      const { app } = await buildApp({ envOverrides: ApprovalsEnv, octokit });
+
+      expect(
+        (await post(app, { prs: [1] }, { query: `key=${Key}` })).status,
+      ).toBe(200);
+      expect(
+        (await post(app, { prs: [1] }, { query: `token=${Key}` })).status,
+      ).toBe(200);
+    });
+
+    /**
+     * A route that approves pull requests must not exist until someone
+     * deliberately configures a key for it.
+     */
+    it('is not mounted at all without a configured key', async () => {
+      const { app } = await buildApp();
+
+      const res = await post(app, { prs: [1] }, { key: Key });
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe('approving a list', () => {
+    it('approves each PR and reports per-PR results', async () => {
+      const { octokit, approved } = approvalOctokit();
+      const { app } = await buildApp({ envOverrides: ApprovalsEnv, octokit });
+
+      const res = await post(app, { prs: [11, 12] }, { key: Key });
+      const json = (await res.json()) as Record<string, unknown>;
+
+      expect(res.status).toBe(200);
+      expect(approved).toEqual([11, 12]);
+      expect(json).toMatchObject({ approved: 2, failed: 0 });
+      expect(json.results).toHaveLength(2);
+    });
+
+    it('passes an optional review body to GitHub', async () => {
+      const { octokit } = approvalOctokit();
+      const { app } = await buildApp({ envOverrides: ApprovalsEnv, octokit });
+
+      await post(app, { prs: [11], body: 'ship it' }, { key: Key });
+      expect(octokit.rest.pulls.createReview).toHaveBeenCalledWith(
+        expect.objectContaining({ body: 'ship it' }),
+      );
+    });
+
+    it('rejects a malformed body before touching GitHub', async () => {
+      const { octokit, approved } = approvalOctokit();
+      const { app } = await buildApp({ envOverrides: ApprovalsEnv, octokit });
+
+      for (const body of [
+        {},
+        { prs: [] },
+        { prs: [0] },
+        { prs: [1], stack: 2 },
+      ]) {
+        expect((await post(app, body, { key: Key })).status).toBe(400);
+      }
+      expect((await post(app, 'not json', { key: Key })).status).toBe(400);
+      expect(approved).toEqual([]);
+    });
+
+    /**
+     * A partial failure reported as 200 would let a caller that only checks the
+     * status code believe every PR was approved.
+     */
+    it('answers 207 when some PRs failed and others were approved', async () => {
+      const { octokit, approved } = approvalOctokit();
+      octokit.rest.pulls.get = vi.fn(
+        async ({ pull_number }: { pull_number: number }) => {
+          if (pull_number === 12)
+            throw Object.assign(new Error('gone'), { status: 404 });
+          return {
+            data: {
+              head: { sha: 'x' },
+              state: 'open',
+              draft: false,
+              merged: false,
+            },
+          };
+        },
+      ) as typeof octokit.rest.pulls.get;
+      const { app } = await buildApp({ envOverrides: ApprovalsEnv, octokit });
+
+      const res = await post(app, { prs: [11, 12] }, { key: Key });
+      expect(res.status).toBe(207);
+      expect(approved).toEqual([11]);
+      expect(await res.json()).toMatchObject({ approved: 1, failed: 1 });
+    });
+
+    it('answers 502 when every PR failed', async () => {
+      const { octokit } = approvalOctokit();
+      octokit.rest.pulls.get = vi.fn(async () => {
+        throw Object.assign(new Error('gone'), { status: 404 });
+      }) as unknown as typeof octokit.rest.pulls.get;
+      const { app } = await buildApp({ envOverrides: ApprovalsEnv, octokit });
+
+      expect((await post(app, { prs: [11, 12] }, { key: Key })).status).toBe(
+        502,
+      );
+    });
+  });
+
+  describe('approving a stack', () => {
+    const Stack = {
+      number: 500,
+      base: { ref: 'main' },
+      open: true,
+      pull_requests: [
+        { number: 10, state: 'closed', draft: false, merged_at: '2026-01-01' },
+        { number: 11, state: 'open', draft: false, merged_at: null },
+        { number: 12, state: 'open', draft: false, merged_at: null },
+      ],
+    };
+
+    it('approves every open PR in the stack', async () => {
+      const { octokit, approved } = approvalOctokit(Stack);
+      const { app } = await buildApp({ envOverrides: ApprovalsEnv, octokit });
+
+      const res = await post(app, { stack: 500 }, { key: Key });
+      const json = (await res.json()) as Record<string, unknown>;
+
+      expect(res.status).toBe(200);
+      expect(approved).toEqual([11, 12]);
+      expect(json).toMatchObject({ stack: 500, approved: 2 });
+    });
+
+    /**
+     * Landing a stack bottom-up leaves merged layers behind. Reporting them as
+     * skips on every call would bury the PRs that actually moved.
+     */
+    it('quietly leaves merged layers out of the results', async () => {
+      const { octokit } = approvalOctokit(Stack);
+      const { app } = await buildApp({ envOverrides: ApprovalsEnv, octokit });
+
+      const json = (await (
+        await post(app, { stack: 500 }, { key: Key })
+      ).json()) as { results: Array<{ pr: number }> };
+      expect(json.results.map((r) => r.pr)).toEqual([11, 12]);
+    });
+
+    it('reports a stack that does not exist', async () => {
+      const { octokit } = approvalOctokit();
+      octokit.request = vi.fn(async () => {
+        throw Object.assign(new Error('nope'), { status: 404 });
+      }) as typeof octokit.request;
+      const { app } = await buildApp({ envOverrides: ApprovalsEnv, octokit });
+
+      const res = await post(app, { stack: 999 }, { key: Key });
+      expect(res.status).toBe(404);
+    });
+
+    it('says so when the whole stack has already landed', async () => {
+      const { octokit, approved } = approvalOctokit({
+        number: 500,
+        pull_requests: [
+          { number: 10, state: 'closed', merged_at: '2026-01-01' },
+        ],
+      });
+      const { app } = await buildApp({ envOverrides: ApprovalsEnv, octokit });
+
+      const res = await post(app, { stack: 500 }, { key: Key });
+      expect(res.status).toBe(200);
+      expect(approved).toEqual([]);
+      expect((await res.json()) as Record<string, unknown>).toMatchObject({
+        approved: 0,
+      });
+    });
+  });
+});
+
+/**
+ * The approvals key may be passed in a URL, which is the leakier form. The
+ * event log must not turn that into a durable record of the secret.
+ */
+describe('event-automation app (approvals key hygiene)', () => {
+  /**
+   * The route index is how an operator learns the surface exists. It must
+   * follow the route's actual availability rather than advertise a 404.
+   */
+  it('appears in the discovery index only when it is mounted', async () => {
+    const paths = async (env?: Partial<AppEnv>) => {
+      const { app } = await buildApp(env ? { envOverrides: env } : {});
+      const doc = (await (
+        await app.fetch(new Request('http://local/discovery.json'))
+      ).json()) as { routes: Array<{ method: string; path: string }> };
+      return doc.routes.map((r) => `${r.method} ${r.path}`);
+    };
+
+    expect(await paths()).not.toContain('POST /webhooks/approvals');
+    expect(await paths({ approvalsWebhookSecret: 'd'.repeat(40) })).toContain(
+      'POST /webhooks/approvals',
+    );
+  });
+
+  it('never records the key in the received-webhook log', async () => {
+    const Key = 'c'.repeat(40);
+    const octokit = mockOctokit();
+    octokit.rest.pulls.get = vi.fn(async () => ({
+      data: { head: { sha: 'x' }, state: 'open', draft: false, merged: false },
+    })) as unknown as typeof octokit.rest.pulls.get;
+    const { app } = await buildApp({
+      envOverrides: { approvalsWebhookSecret: Key },
+      octokit,
+    });
+
+    await app.fetch(
+      new Request(`http://local/webhooks/approvals?key=${Key}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prs: [11] }),
+      }),
+    );
+    await drain();
+
+    const log = await (
+      await app.fetch(new Request('http://local/events/json'))
+    ).text();
+    expect(log).not.toContain(Key);
   });
 });

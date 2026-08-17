@@ -15,6 +15,8 @@ src/
 ├── env.ts                   # Zod-validated environment -> AppEnv
 ├── flow-runs/sqlite.ts      # persistent FlowRunStore for coordinator + dashboard
 ├── github/checks.ts         # check-run + PR-comment upserts (create-or-update)
+├── github/approvals.ts      # bulk PR approval + gh-stack expansion
+├── github/approval-request.ts # the approval webhook's request body
 ├── github/octokit.ts        # the shared installation client
 ├── github/pr-opened.ts      # the preview-labels explainer (PR_OPENED_COMMENT)
 ├── pstack/reporter.ts       # pstack events -> 3 check runs + a tracked PR comment
@@ -141,6 +143,10 @@ own table cannot trigger it.
   `skipped` and drops matching in-memory reporter state. Specific cleanup accepts
   only the canonical `pr-<number>` name because a GitHub check suite is scoped to
   the App and commit, not to a prefixed pstack deployment.
+- `POST /webhooks/approvals` — bulk PR approval. Send `{"prs":[1,2]}` or
+  `{"stack":500}` (a stack number, or any PR in the stack). Authenticate with
+  `X-Api-Key`, `Authorization: Bearer`, or `?key=`/`?token=`. **Only mounted when
+  `APPROVALS_WEBHOOK_SECRET` is set** — see below.
 - `GET /health` — liveness probe.
 - `GET /previews` — the preview stacks currently mirrored onto checks.
 - `GET /events` (HTML table of received webhooks) and `GET /events/json`. The
@@ -149,6 +155,31 @@ own table cannot trigger it.
   `?token=<token>` (unset = public).
 - `GET /dashboard` — Vue dashboard (`@samyx/gha-ui`): rules→handlers flow, event
   log, handler log, persisted flow runs, and config. Same token guard as `/events`.
+
+## Bulk approval
+
+Approving the top of a `gh stack` means approving every layer beneath it, which
+by hand is tedious and easy to leave half-done. This route takes an explicit
+list of PRs or a whole stack, which it expands through GitHub's stacked-PR
+endpoints (`/repos/{o}/{r}/stacks/{n}` for the members, and the one GraphQL call
+that answers "which stack is this PR in?", since REST has no such direction).
+
+Approving is a write against review state, so the shape follows from that:
+
+- **Every refusal is per PR and reported.** Merged, closed and draft PRs are
+  skipped rather than approved; an unknown one fails on its own. A bulk call
+  quietly picking up an unintended PR is the failure that matters.
+- **Partial success is normal**, so the response is a per-PR result list and the
+  status code reflects the mix — `207` when some approved and some failed, so a
+  caller checking only the code cannot read that as a clean success.
+- **Re-approving is a no-op.** GitHub accepts duplicate `APPROVE` reviews and
+  notifies every subscriber for each, so an existing approval from this App is
+  left alone. Only this App's own reviews count: a human's approval is not a
+  reason to withhold the one that was asked for.
+
+The key is compared in constant time and must be at least 32 characters
+(enforced at startup), because it is the route's entire authorization story and
+is accepted in a query string.
 
 ## Flow-run persistence
 
@@ -194,6 +225,13 @@ restricted to `GITHUB_ALLOWED_REPOS`.
 
 The checks cleanup webhook accepts its dedicated bearer secret in the
 `Authorization` header only. It never accepts the secret in the URL.
+
+The bulk-approval webhook does accept its key in the URL, because some callers
+cannot set headers. That is the weaker position, so it is compensated for: the
+route does not exist unless a key is configured, the key has an enforced minimum
+length, and it is compared in constant time. The received-webhook log records
+only engine-ingested deliveries, so a key passed in a query string does not land
+there.
 
 ## Configuration
 

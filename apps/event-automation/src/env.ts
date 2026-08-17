@@ -23,6 +23,7 @@ export const envSchema = z.object({
   PSTACK_TOLERANCE_MS: z.string().optional(),
   PSTACK_COMMAND_TIMEOUT_MS: z.string().optional(),
   PR_OPENED_COMMENT: z.string().optional(),
+  APPROVALS_WEBHOOK_SECRET: z.string().optional(),
   EVENT_LOG_LIMIT: z.string().optional(),
   EVENT_LOG_TOKEN: z.string().optional(),
   FLOW_RUN_DB_PATH: z.string().min(1).optional(),
@@ -70,6 +71,12 @@ export interface AppEnv {
    * is a deliberate choice per deployment.
    */
   prOpenedComment: boolean;
+  /**
+   * Shared key for the bulk-approval webhook. **Unset disables the route**
+   * entirely rather than leaving it open: approving PRs is a write against
+   * review state, so there is no safe default.
+   */
+  approvalsWebhookSecret?: string;
   /** Max rows retained by the in-memory event log (LRU). Defaults to 500. */
   eventLogLimit: number;
   /**
@@ -115,6 +122,18 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     throw new Error('PSTACK_API_TOKEN is set but PSTACK_API_URL is not');
   }
 
+  // This one key is the whole authorization story for a route that approves
+  // pull requests, and it is accepted in a query string, so a short one is
+  // both guessable and easy to leak. 32 hex chars is what `openssl rand -hex
+  // 16` produces; the docs suggest twice that.
+  const approvalsSecret = parsed.APPROVALS_WEBHOOK_SECRET?.trim();
+  if (approvalsSecret !== undefined && approvalsSecret.length < 32) {
+    throw new Error(
+      'APPROVALS_WEBHOOK_SECRET must be at least 32 characters — it is the only ' +
+        'guard on a route that approves pull requests',
+    );
+  }
+
   return {
     githubAppId: parsed.GITHUB_APP_ID,
     githubAppPrivateKey: parsed.GITHUB_APP_PRIVATE_KEY.replaceAll('\\n', '\n'),
@@ -148,6 +167,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
       false,
       'PR_OPENED_COMMENT',
     ),
+    approvalsWebhookSecret: approvalsSecret,
     eventLogLimit: parseEventLogLimit(parsed.EVENT_LOG_LIMIT),
     eventLogToken: parsed.EVENT_LOG_TOKEN,
     flowRunDbPath: parsed.FLOW_RUN_DB_PATH ?? './data/flow-runs.sqlite',

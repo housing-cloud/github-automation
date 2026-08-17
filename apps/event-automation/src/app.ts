@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto';
 import { dashboardRoutes, type EventLogLike } from '@samyx/gha-ui';
 import type { FlowRunStore, Logger } from '@samyx/github-automation-suite';
 import { createEngine, noopLogger } from '@samyx/github-automation-suite';
@@ -10,6 +11,11 @@ import { eventLogRoutes } from '@samyx/github-automation-suite/plugins/event-log
 import { Hono, type MiddlewareHandler } from 'hono';
 import type { AppEnv } from './env';
 import { type AppOctokit, clearPstackChecks } from './github/checks';
+import {
+  MAX_PRS_PER_REQUEST,
+  parseApprovalRequest,
+} from './github/approval-request';
+import { approvePullRequests, resolveStack } from './github/approvals';
 import { createOctokit } from './github/octokit';
 import { createPstackClient, readServiceUrls } from './pstack/client';
 import { PstackCommands } from './pstack/commands';
@@ -187,6 +193,103 @@ export async function createEventAutomation(
   });
   app.route('/webhooks/pstack/checks/clear', checkCleanup);
 
+  // Bulk PR approval. Registered only when a key is configured — a route that
+  // approves pull requests must not exist by default.
+  if (env.approvalsWebhookSecret) {
+    const approvals = new Hono();
+    approvals.use('*', apiKeyGuard(env.approvalsWebhookSecret));
+    approvals.post('/', async (c) => {
+      let raw: unknown;
+      try {
+        raw = await c.req.json();
+      } catch {
+        return c.json({ error: 'body must be valid JSON' }, 400);
+      }
+
+      const request = parseApprovalRequest(raw);
+      if ('error' in request) return c.json({ error: request.error }, 400);
+
+      const repo = { owner: env.githubOrg, name: env.pstackRepo };
+      let prs: number[];
+      let stack: number | undefined;
+
+      if (request.kind === 'stack') {
+        const resolved = await resolveStack(
+          octokit,
+          repo,
+          request.stack,
+          logger,
+        );
+        if (!resolved) {
+          return c.json(
+            {
+              error: `no stack ${request.stack} in ${repo.owner}/${repo.name}`,
+            },
+            404,
+          );
+        }
+        stack = resolved.number;
+        // Merged layers are the normal state of a stack being landed bottom-up,
+        // so they are filtered here rather than reported as skips on every call.
+        prs = resolved.pullRequests
+          .filter((pull) => !pull.merged && (pull.state ?? 'open') === 'open')
+          .map((pull) => pull.number);
+        if (prs.length === 0) {
+          return c.json({
+            stack: resolved.number,
+            approved: 0,
+            results: [],
+            note: 'every pull request in this stack is already merged or closed',
+          });
+        }
+        if (prs.length > MAX_PRS_PER_REQUEST) {
+          return c.json(
+            {
+              error: `stack ${stack} has more than ${MAX_PRS_PER_REQUEST} open pull requests`,
+            },
+            422,
+          );
+        }
+      } else {
+        prs = request.prs;
+      }
+
+      const results = await approvePullRequests(prs, {
+        octokit,
+        repo,
+        logger,
+        body: request.body,
+        includeDrafts: request.drafts,
+      });
+
+      const counts = {
+        approved: results.filter((r) => r.status === 'approved').length,
+        alreadyApproved: results.filter((r) => r.status === 'already-approved')
+          .length,
+        skipped: results.filter((r) => r.status === 'skipped').length,
+        failed: results.filter((r) => r.status === 'failed').length,
+      };
+      logger.info(
+        { repo: repo.name, stack, ...counts },
+        'approvals: bulk approval finished',
+      );
+
+      // 207 when the outcome is mixed: a caller that only checks the status
+      // code should not read a partial failure as a clean success.
+      const status =
+        counts.failed === 0
+          ? 200
+          : counts.failed === results.length
+            ? 502
+            : 207;
+      return c.json(
+        { ...(stack ? { stack } : {}), ...counts, results },
+        status,
+      );
+    });
+    app.route('/webhooks/approvals', approvals);
+  }
+
   // `/events` — HTML table of received webhooks; `/events/json` — the same as
   // JSON. Mounted through a wrapper so the optional token guard (registered
   // before the routes) applies to the whole subtree.
@@ -240,6 +343,8 @@ export async function createEventAutomation(
         'pstack (preview-stacks) signed webhook ingress',
       'POST /webhooks/pstack/checks/clear':
         'Clear pstack checks for one stack or every open PR',
+      'POST /webhooks/approvals':
+        'Approve a list of pull requests, or every open PR in a gh-stack',
       'GET /events': 'Received-webhooks log (HTML table)',
       'GET /events/json': 'Received-webhooks log (JSON)',
       'GET /dashboard':
@@ -278,6 +383,47 @@ function bearerGuard(token: string, allowQuery = false): MiddlewareHandler {
     if (allowQuery && c.req.query('token') === token) return next();
     return c.json({ error: 'unauthorized' }, 401);
   };
+}
+
+/**
+ * Gate a route on a shared key, accepted as `X-Api-Key`, as
+ * `Authorization: Bearer <key>`, or as `?key=` / `?token=`.
+ *
+ * The query forms exist because this is called from places that cannot set
+ * headers easily — a CI `curl`, a chat-ops button, a webhook field that only
+ * takes a URL. They are also the leakier forms, since URLs land in logs and
+ * shell history, which is why the key has a minimum length (see `env.ts`) and
+ * this route is off unless one is configured.
+ *
+ * Compared in constant time: a naive `===` on a secret leaks its prefix to a
+ * patient caller through timing, and unlike the pstack ingress there is no
+ * signature here to fall back on.
+ */
+function apiKeyGuard(key: string): MiddlewareHandler {
+  return async (c, next) => {
+    const presented =
+      c.req.header('x-api-key') ??
+      c.req.header('authorization')?.replace(/^Bearer\s+/i, '') ??
+      c.req.query('key') ??
+      c.req.query('token');
+    if (presented !== undefined && timingSafeEquals(presented, key)) {
+      return next();
+    }
+    return c.json({ error: 'unauthorized' }, 401);
+  };
+}
+
+/** Constant-time string comparison over the UTF-8 bytes. */
+function timingSafeEquals(a: string, b: string): boolean {
+  const left = Buffer.from(a, 'utf8');
+  const right = Buffer.from(b, 'utf8');
+  // `timingSafeEqual` throws on a length mismatch, which would itself be a
+  // timing signal, so the lengths are folded into the result instead.
+  if (left.length !== right.length) {
+    timingSafeEqual(left, left);
+    return false;
+  }
+  return timingSafeEqual(left, right);
 }
 
 function parseClearTarget(

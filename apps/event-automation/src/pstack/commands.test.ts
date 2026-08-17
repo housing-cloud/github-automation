@@ -252,6 +252,8 @@ function mockOctokit() {
       pulls: {
         get: vi.fn(async () => ({ data: { head: { sha: 'head-sha' } } })),
         list: vi.fn(async () => ({ data: [] })),
+        createReview: vi.fn(async () => ({ data: { id: 1 } })),
+        listReviews: vi.fn(async () => ({ data: [] })),
       },
       issues: {
         listLabelsOnIssue: vi.fn(async () => ({ data: [] })),

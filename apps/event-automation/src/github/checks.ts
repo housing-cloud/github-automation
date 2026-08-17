@@ -29,6 +29,13 @@ export interface IssueComment {
   body?: string | null | undefined;
 }
 
+/** A submitted review, reduced to what re-approval needs to decide. */
+export interface PullRequestReview {
+  id: number;
+  state?: string;
+  user?: { login?: string; type?: string } | null;
+}
+
 /**
  * The slice of Octokit this service depends on.
  *
@@ -36,6 +43,17 @@ export interface IssueComment {
  * the GitHub plugin's handlers and the reporter's upserts.
  */
 export interface AppOctokit {
+  /**
+   * The generic REST caller every Octokit exposes.
+   *
+   * Needed because GitHub's stacked-pull-request endpoints (`/repos/{o}/{r}/
+   * stacks/...`) are not in Octokit's generated surface yet. Optional so the
+   * many test doubles that never touch a stack stay valid.
+   */
+  request?: <T = unknown>(
+    route: string,
+    params?: Record<string, unknown>,
+  ) => Promise<{ data: T }>;
   rest: {
     checks: {
       create: (params: {
@@ -97,7 +115,15 @@ export interface AppOctokit {
         repo: string;
         pull_number: number;
       }) => Promise<{
-        data: { head: { sha: string }; html_url?: string; state?: string };
+        data: {
+          head: { sha: string };
+          html_url?: string;
+          state?: string;
+          /** A draft cannot be approved meaningfully — see `approvals.ts`. */
+          draft?: boolean;
+          merged?: boolean;
+          title?: string;
+        };
       }>;
       list: (params: {
         owner: string;
@@ -108,6 +134,25 @@ export interface AppOctokit {
       }) => Promise<{
         data: Array<{ number: number; head: { sha: string } }>;
       }>;
+      /**
+       * Submit a review. Only ever called with `event: 'APPROVE'` here — see
+       * `approvals.ts`, which is the sole caller.
+       */
+      createReview: (params: {
+        owner: string;
+        repo: string;
+        pull_number: number;
+        event: 'APPROVE';
+        body?: string;
+      }) => Promise<{ data: { id: number; state?: string } }>;
+      /** Reviews already on a PR, used to skip one this App has approved. */
+      listReviews: (params: {
+        owner: string;
+        repo: string;
+        pull_number: number;
+        per_page?: number;
+        page?: number;
+      }) => Promise<{ data: PullRequestReview[] }>;
     };
     issues: {
       listLabelsOnIssue: (params: {

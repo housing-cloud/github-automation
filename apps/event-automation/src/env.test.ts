@@ -229,3 +229,38 @@ describe('loadEnv — PR_OPENED_COMMENT', () => {
     );
   });
 });
+
+describe('loadEnv — APPROVALS_WEBHOOK_SECRET', () => {
+  const Key = 'a'.repeat(32);
+
+  /** Unset disables the route; there is no safe default for approving PRs. */
+  it('is unset by default', () => {
+    expect(loadEnv(raw()).approvalsWebhookSecret).toBeUndefined();
+  });
+
+  it('accepts a long enough key', () => {
+    expect(
+      loadEnv(raw({ APPROVALS_WEBHOOK_SECRET: Key })).approvalsWebhookSecret,
+    ).toBe(Key);
+  });
+
+  /**
+   * This key is the entire authorization story for a route that approves pull
+   * requests, and it is accepted in a query string. A short one is both
+   * guessable and easy to leak, so it is refused at startup rather than in
+   * review.
+   */
+  it('rejects a key short enough to guess', () => {
+    for (const value of ['x', 'hunter2', 'a'.repeat(31)]) {
+      expect(() => loadEnv(raw({ APPROVALS_WEBHOOK_SECRET: value }))).toThrow(
+        /APPROVALS_WEBHOOK_SECRET/,
+      );
+    }
+  });
+
+  it('does not let surrounding whitespace pad a short key', () => {
+    expect(() =>
+      loadEnv(raw({ APPROVALS_WEBHOOK_SECRET: `  ${'a'.repeat(20)}  ` })),
+    ).toThrow(/APPROVALS_WEBHOOK_SECRET/);
+  });
+});
